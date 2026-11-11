@@ -3,12 +3,14 @@
 #include <PalmOS.h>
 #include "fujinet-nio.h"
 #include "NioLib.h"
+#include "NioLibCS1Diagnostic.h"
 
 /* Shared-only hooks: the default static Palm build remains unchanged. */
 UInt16 nl_bus_read(UInt32 address);
 void nl_bus_write(UInt32 address, UInt16 value);
 Err nl_card_attr(UInt16 card, UInt16 attr, void *value);
 int nl_expired(UInt32 start, UInt32 wait);
+int nl_cs1_expired(UInt32 start, UInt32 wait);
 void nl_deadline(UInt16 milliseconds);
 UInt16 nl_transport_probe(UInt16 *hostP, UInt16 *busyP);
 UInt16 nl_transport_begin(void);
@@ -33,6 +35,9 @@ UInt16 nl_cs1_probe(UInt16 *, UInt16 *);
 UInt16 nl_cs1_begin(void);
 UInt16 nl_cs1_pending(void);
 void nl_cs1_retire(void);
+extern NioLibCS1Diagnostic nl_cs1_diag;
+void nl_cs1_diagnostic_begin(void);
+UInt16 nl_cs1_guard_result(void);
 Boolean nl_cs1_reply_valid(const UInt8 *, const UInt8 *, UInt16, UInt16, UInt16);
 UInt16 nl_cs1_last_result(void);
 UInt16 nl_cs1_ambiguous(void);
@@ -49,11 +54,12 @@ UInt16 nl_usb_pending(void);
 UInt16 nl_usb_owned(void);
 UInt16 nl_usb_available(void);
 UInt16 nl_usb_exchange(const UInt8 *, UInt16, UInt8 *, UInt16, UInt16 *);
+void nl_note_open_failure(UInt16 result);
 UInt16 nl_json_query(UInt16 handle, const Char *selector);
 Boolean nl_payload_valid(const UInt8 *, const UInt8 *, UInt16, UInt16);
 
 #ifdef FN_PALMOS_SHARED
 #define FN_PALMOS_CARD_ATTR_GET nl_card_attr
-#define FN_PALMOS_EXPIRED(start, wait) nl_expired((start), (wait))
+#define FN_PALMOS_EXPIRED(start, wait) nl_cs1_expired((start), (wait))
 #endif
 #endif

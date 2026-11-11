@@ -5,6 +5,13 @@ Python, a native C compiler and NioLib's pinned test-only
 [requirements](../tests/requirements-palmos-shared.txt). Unicorn executes actual
 compiled 68K code with mocked OS calls; it does not boot Palm OS.
 
+The CS1 fault suite also covers isolated RESULT corruption without duplicate
+remote opens, genuine request rejection, inconsistent completion bounds,
+separate deadline/mapping/removal/length/checksum failures, clean settled query
+cleanup while retaining pending replies and earlier mutating uncertainty, and
+reading the diagnostic dialogs without transport activity.
+See [physical CS1 reproduction and record fields](palmos-cs1-diagnostics.md).
+
 ```sh
 python3 -m venv build/palmos-test-venv
 build/palmos-test-venv/bin/pip install -r tests/requirements-palmos-shared.txt
@@ -15,10 +22,11 @@ make test-palmos-shared PALMOS_SHARED_PYTHON=build/palmos-test-venv/bin/python
 Missing Unicorn, required artifacts or ABI audit entries **fails** the target.
 Native image tests do not replace compiled execution. The build audit checks
 resources, trap ordinals, relocations, A4 entry/exit, absence of A5 accesses and
-unwanted CRT code. The full gate builds every configured target including Palm:
+unwanted CRT code. Run the general and Palm gates separately:
 
 ```sh
-make check PALMOS_SHARED_PYTHON=build/palmos-test-venv/bin/python
+make check
+make check-palmos PALMOS_SHARED_PYTHON=build/palmos-test-venv/bin/python
 ```
 
 The full check requires the other platform toolchains as well; the Palm image
@@ -83,3 +91,42 @@ then confirm Reset in NIO Config. Verify the flag clears, the next Clock passes
 and the host has no old handles. Canceling Reset must preserve the marker.
 Save changes before Reset. Preserve logs/Palm errors for failures; never replay
 a state-changing operation merely to find out whether it succeeded.
+
+## ABI 1.6 services and growth
+
+`tests/palmos_service_link.c` references every added client binding from the real
+archive in NioLibTest. `test_palmos_shared_services.py` executes those compiled
+wrappers/common codecs and checks file browsing/transfer, caller-buffered disk
+inspection, HTTP headers and uncertain Open cleanup, Device/HSIO, Wi-Fi,
+AppStore/legacy appkeys, Clock, slot catalogue and mount resolution. File and
+device calls also exercise serial/USB framing. The mock peers provide wire
+replies and Palm OS traps, never replacement service implementations.
+
+The tests cover nonzero byte arguments and short enums in Palm GCC's C ABI,
+UInt16 trap conversions, appkey details before initialization, old library
+version/capability negotiation, ownership guards and no raw NetworkService
+escape around handle cleanup. Clock binary formats have exact output bounds;
+ISO strings are terminated even when the host omits a NUL. Native wire vectors
+reject malformed lengths/offsets/versions and verify no partial file output or
+hidden file retry. Their shell runners are part of the general `test` target.
+
+`test-palmos-layout` builds independent early/late padding fixtures, verifies
+actual resource growth and unchanged globals/ordinals, and executes compiled
+lifecycle/register/network tests. The network tests relocate the resource to
+three addresses, including above 0x80000. See
+[layout and budget evidence](palmos-shared-layout.md).
+
+On 2026-11-11 the user reported three successful TNFS browse/PRC-install cycles
+over Springboard to POSIX NIO with implementation 11, without transfer or cleanup
+errors. This is physical acceptance evidence for that workflow; HTTP, other
+transports and reset/recovery qualification remain separate. Earlier captured
+out-of-range CS1 metadata reads remain documented diagnostic evidence, not a
+proven hardware root cause or proof that intermittent faults cannot recur.
+
+On this development environment,
+BBC/Watcom/Amiga toolchains, the sibling Amiga driver ABI headers and
+`soft65c02_unit` are unavailable, so the full general `make check` cannot be
+reported as passing. Atari/C64 and hosted Linux archives and available native
+wire/link tests provide constrained/non-cc65 coverage; the separate Palm check
+uses `../palmdev-toolchain`. Do not replace missing prerequisites with no-op
+successes when completing upstream validation.

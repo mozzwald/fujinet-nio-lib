@@ -12,9 +12,64 @@
 #define SEND_TRIES 3
 #define READ_RETRIES 3
 
+#ifdef FN_PALMOS_SHARED
+#define ACCESS_RESULT() nl_cs1_guard_result()
+#define PHASE(p) (nl_cs1_diag.phase = (p))
+#else
+#define ACCESS_RESULT() 0
+#define PHASE(p) ((void)0)
+#endif
+
 #ifndef FN_PALMOS_EXPIRED
 #define FN_PALMOS_EXPIRED(start, wait) (TimGetTicks() - (start) > (wait))
 #endif
+
+/* RESULT is a separate, unchecked bus word. Never let one bad read authorize
+ * replay of a side-effecting request. Require two consecutive matching idle
+ * snapshots bracketed by this request's sequence. ABI-4 error replies have
+ * zero length/check; a rejection alongside a nonempty reply is inconsistent.
+ * These are bounded reads of the held completion, never a command replay. */
+static uint16_t read_result(uint16_t seq)
+{
+    uint16_t attempt, first, ack, response, result, last, tail;
+    uint16_t length, check, previous = 0xffffu;
+    for (attempt = 0; attempt < 4; ++attempt) {
+        first = FN_PALMOS_RD(SBN_R_STATUS);
+        ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
+        response = FN_PALMOS_RD(SBN_R_RESP_SEQ);
+        result = FN_PALMOS_RD(SBN_R_RESULT);
+        length = check = 0;
+        if (result != SBN_RES_OK) {
+            length = FN_PALMOS_RD(SBN_R_RESP_LEN);
+            check = FN_PALMOS_RD(SBN_R_RESP_CHECK);
+        }
+        last = FN_PALMOS_RD(SBN_R_STATUS);
+        tail = FN_PALMOS_RD(SBN_R_RESP_SEQ);
+#ifdef FN_PALMOS_SHARED
+        nl_cs1_diag.resultAttempt = attempt + 1;
+        nl_cs1_diag.statusFirst = first; nl_cs1_diag.statusLast = last;
+        nl_cs1_diag.ack = ack; nl_cs1_diag.sequence = response;
+        nl_cs1_diag.sequenceLast = tail; nl_cs1_diag.expectedSequence = seq;
+        nl_cs1_diag.result = result;
+        if (result != SBN_RES_OK) {
+            nl_cs1_diag.wireLength = length; nl_cs1_diag.expectedCheck = check;
+        }
+#endif
+        if (ACCESS_RESULT()) return ACCESS_RESULT();
+        if (((first | last) & SBN_ST_BUSY) || ack != seq ||
+            response != seq || tail != seq || result > SBN_RES_REFUSED ||
+            length || check) {
+            previous = 0xffffu;
+            continue;
+        }
+        if (previous == result) return result;
+        previous = result;
+    }
+#ifdef FN_PALMOS_SHARED
+    nl_cs1_diag.reason = nioCS1ReasonSnapshot;
+#endif
+    return FN_PALMOS_BAD_READ;
+}
 
 /* BEGIN, the bytes two per DATA word (first one high), then CHECK over them. */
 static void send_request(const uint8_t *req, uint16_t len)
@@ -47,6 +102,12 @@ static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len,
     uint16_t keep, pairs, words, w, check = 0;
 
     *wire_len = n;
+#ifdef FN_PALMOS_SHARED
+    nl_cs1_diag.wireLength = n; nl_cs1_diag.expectedCheck = want;
+    nl_cs1_diag.computedCheck = 0;
+    nl_cs1_diag.reason = nioCS1ReasonLength;
+#endif
+    if (ACCESS_RESULT()) return 0;
     if (n > SBN_RESP_MAX) return 0;
     keep = n < cap ? n : cap;
     pairs = keep >> 1;
@@ -70,6 +131,11 @@ static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len,
         check = SBN_CHECK_STEP(check, w);
     }
     *resp_len = keep;
+#ifdef FN_PALMOS_SHARED
+    nl_cs1_diag.computedCheck = check;
+    nl_cs1_diag.reason = nioCS1ReasonWordCheck;
+#endif
+    if (ACCESS_RESULT()) return 0;
     return check == want;
 }
 
@@ -84,17 +150,39 @@ uint16_t fn_palmos_exchange(const uint8_t *req, uint16_t len, uint8_t *resp, uin
     if (!len || len > SBN_REQ_MAX) return SBN_RES_BAD_LEN;
     for (tries = 0; tries < SEND_TRIES && result == SBN_RES_BAD_CHECK; tries++) {
         if (++_fn_palmos_seq == 0) _fn_palmos_seq = 1;
+        PHASE(nioCS1PhaseSend);
         send_request(req, len);
+        if (ACCESS_RESULT()) return ACCESS_RESULT();
         FN_PALMOS_WR(SBN_W_DOORBELL, _fn_palmos_seq);
+        if (ACCESS_RESULT()) return ACCESS_RESULT();
+        PHASE(nioCS1PhaseWait);
         start = TimGetTicks();
         while (FN_PALMOS_RD(SBN_R_RESP_SEQ) != _fn_palmos_seq)
-            if (FN_PALMOS_EXPIRED(start, wait)) return FN_PALMOS_NO_ANSWER;
-        result = FN_PALMOS_RD(SBN_R_RESULT);
+            if (FN_PALMOS_EXPIRED(start, wait)) {
+#ifdef FN_PALMOS_SHARED
+                nl_cs1_diag.reason = nioCS1ReasonPoll;
+#endif
+                return FN_PALMOS_NO_ANSWER;
+            }
+        PHASE(nioCS1PhaseResult);
+        result = read_result(_fn_palmos_seq);
     }
     /* Only a good result has a reply to read. */
-    if (result != SBN_RES_OK) return result;
+    if (result != SBN_RES_OK) {
+#ifdef FN_PALMOS_SHARED
+        if (!nl_cs1_diag.reason) nl_cs1_diag.reason = nioCS1ReasonBridge;
+#endif
+        return result;
+    }
+    PHASE(nioCS1PhaseReply);
     for (tries = 0; tries <= READ_RETRIES; tries++) {
-        if (!read_reply(resp, cap, resp_len, &wire_len)) continue;
+#ifdef FN_PALMOS_SHARED
+        nl_cs1_diag.replyAttempt = tries + 1;
+#endif
+        if (!read_reply(resp, cap, resp_len, &wire_len)) {
+            if (ACCESS_RESULT()) { *resp_len = 0; return ACCESS_RESULT(); }
+            continue;
+        }
 #ifdef FN_PALMOS_SHARED
         /* Validate the same captured length/data as the word checksum. A bad
          * read retries this held reply, never the remote command. */

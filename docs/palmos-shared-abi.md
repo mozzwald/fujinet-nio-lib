@@ -10,7 +10,7 @@ See the [shared-library guide](palmos-shared-library.md) for build and lifecycle
 | --- | --- |
 | Library database / type / creator | `NioLib` / `libr` / `NiL1` |
 | Diagnostic application / creator | `NioLibTest` / `NiT1` |
-| ABI major.minor / implementation | **1.5 / 8** |
+| ABI major.minor / implementation | **1.6 / 11** |
 | Scalar layout | Palm fixed-width UInt16/UInt32, native big-endian, 2-byte alignment |
 
 Find with `SysLibFind`, load with `SysLibLoad` if missing, query version and
@@ -31,6 +31,7 @@ ABI 1.0 foundation clients remain compatible but cannot use networking.
 | USB | `0x20` |
 | Cached JSON selector | `0x40` |
 | Confirmed idle transport recovery | `0x80` |
+| Extended services | `0x100` |
 | Foundation globals diagnostics (`TestOnly`, legacy `TestGlobals` alias) | `0x80000000` |
 
 The diagnostics bit describes retained test entry points; the library also
@@ -107,3 +108,43 @@ backends or unreleasable driver resources cause Busy. Invalid arguments cause
 Param; failed marker write/read-back causes Globals. The trap clears only the
 specified marker, sends no packets and never replays a request. Follow the
 user guide's recovery procedure: clearing local state cannot undo side effects.
+
+## ABI 1.6 service additions
+
+`nioLibCapServices` (`0x100`) and ABI minor >= 6 are both required for the
+extended traps declared in `NioLibServices.h`, included by `NioLib.h`. Existing
+ordinals and structures are preserved. The client checks capability/version
+before calling a new trap and returns `FN_ERR_UNSUPPORTED` for older libraries.
+New arguments use fixed-width scalars and caller-owned public NIO structures,
+Palm two-byte alignment, and no retained caller pointers. Byte-sized inputs
+are widened to UInt16 for traps and checked before conversion to common C.
+Enums remain on the C-client side; timestamps cross traps as eight LE bytes.
+
+| Traps | Service |
+| --- | --- |
+| `0xA818` | Guarded RawCall |
+| `0xA819`–`0xA81D` | File stat/read/write/mkdir/ListPages |
+| `0xA81E` | HTTP Open with headers and body length |
+| `0xA81F` | Fuji firmware/build information |
+| `0xA820`–`0xA826` | Wi-Fi status/config/set/adapter/scan/trial join/join status |
+| `0xA827`–`0xA82B` | AppStore stat/read/write/delete/list |
+| `0xA82C`–`0xA82F` | Slot catalogue get/put/delete/range |
+| `0xA830`–`0xA831` | Resolve mount target / format display |
+| `0xA832`–`0xA833` | Set runtime / persistent timezone |
+| `0xA834`–`0xA83B` | Disk mount/unmount/flush/info/change/restore/read/write operations |
+| `0xA83C`–`0xA83F` | Set time / NTP sync / formatted time / timezone-specific time |
+| `0xA840`–`0xA844` | Legacy appkey namespace/read/buffered read/write and disk last-error query (see declarations) |
+| `0xA845` | Disk inspection without mounting |
+| `0xA846`–`0xA847` | Fuji HSIO get/set |
+
+The exact per-call ordering is authoritative in `NioLibServices.h` and checked
+against the generated dispatch table by the image audit. RawCall accepts the
+foreground token and standard `fn_raw_response_t`; Palm Err, FN call result,
+and remote response status remain distinct. Raw NetworkService commands return
+Unsupported because they bypass owned-handle allocation/cleanup. Use the typed
+network calls instead. Other raw commands receive ordinary framing/identity/
+checksum validation and are never automatically replayed by this entry point.
+
+The byte-sized C argument ABI and short enums used by Palm GCC are deliberately
+kept out of the trap ABI. Client tests exercise compiled wrappers, including
+parameters with nonzero byte values, instead of assuming host C layouts.

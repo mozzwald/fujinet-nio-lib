@@ -130,7 +130,14 @@ using earlier compatible traps need no rebuild merely to select USB.
 
 ## Application contract
 
-Current identity is **NioLib / libr / NiL1**, ABI **1.5**, implementation **8**.
+Current identity is **NioLib / libr / NiL1**, ABI **1.6**, implementation **11**.
+
+Implementation 10 validates Springboard completion results before accepting an
+error or resending a rejected request. Its developer test app can display the
+first failed exchange's captured register/checksum and local guard details;
+see [CS1 diagnostics](palmos-cs1-diagnostics.md). Implementation 11 separates
+audited handleless query errors from historical mutating-command uncertainty;
+see [read-only cleanup policy](palmos-readonly-cleanup.md).
 See [ABI reference](palmos-shared-abi.md) for capabilities, traps and preferences.
 The client supports networking libraries from ABI 1.1 onward, negotiates optional
 functions, and returns Unsupported instead of calling an unknown JSON trap.
@@ -139,7 +146,14 @@ NioConfig needs ABI 1.2 settings support; USB additionally needs capability `0x2
 Supported client operations are `fn_init`, `fn_shutdown`, `fn_is_ready`,
 `fn_open`, `fn_open_translated`, `fn_info`, `fn_read`, `fn_write`, `fn_close`,
 `fn_ready`, `fn_json_query`, `fn_clock_get` and `fn_clock_get_timezone`.
-This is a subset of the generic NIO-LIB API, not an export of every service.
+ABI 1.6 additionally exposes HTTP headers, all common Clock and Device/Wi-Fi
+calls, FileDevice stat/read/write/mkdir/ListPages, AppStore and legacy appkeys,
+slot catalogue and path resolution, and the default DiskDevice operations plus
+caller-buffered inspection. The client archive also supplies `fn_tcp_open`,
+`fn_open_long`, error/version strings and the pure AppStore/catalogue parsers.
+The explicit callback-based disk `_context` APIs and platform-private register
+accessors remain part of the static library, not the foreground shared API.
+See [ABI additions](palmos-shared-abi.md#abi-16-service-additions).
 
 One foreground application owns a session, identified by its Palm database and
 a token. Multiple network handles belong to that owner; capacity is returned
@@ -183,8 +197,9 @@ change RP2350 timing or ROM. Full packet validation runs inside the bounded
 held-reply read loop and uses its captured wire length. Corrupt checksums,
 packet echoes or metadata re-read the held reply without sending the command
 again. EndClient can recheck and retire the exact completed pending sequence;
-it still reports earlier ambiguous command outcomes and preserves unmatched
-pending markers.
+it still reports earlier ambiguous mutating-command outcomes and preserves
+unmatched pending markers. Audited handleless query errors remain operation
+errors without latching historical mutation uncertainty.
 
 **Serial** uses New Serial Manager where present and falls back to the legacy
 Serial Library. It selects the cradle port, 8N1, 9600/19200/38400/57600/115200 baud
@@ -246,7 +261,10 @@ and dispatch table; `nDat/0` contains a validated initialized-data/BSS/fixup ima
 `SysLibTblEntry(refNum)->globalsP`, preserving the caller's A4/A5. First Open
 allocates system-owned storage, initializes data/BSS and relocates data/code
 pointers. The serializer rejects unsupported fixups, caller-A5 dependencies,
-unresolved helpers and code/global images above its 32767-byte limits.
+unresolved helpers, code resources above 64,720 bytes and globals above
+32,767 bytes. The linker still rejects every overflowing PC-relative call.
+See [code layout and growth checks](palmos-shared-layout.md) for placement,
+remaining range margins and padded-build validation.
 
 External library Open counts, foreground ownership, physical driver ownership
 and unresolved-command markers are separate. EndClient releases foreground
@@ -295,7 +313,7 @@ must not be treated as permanent storage.
 compiled m68k tests with mocked Palm traps, optional app fixtures and physical
 acceptance steps. Automated tests validate generated code, not full Palm OS behavior.
 
-The current ABI 1.5 recovery changes and SDK 3.1-built artifacts have not been
+The ABI 1.6 service additions and SDK 3.1-built artifacts have not been
 qualified on physical hardware. Linux builds and mocked execution tests pass;
 the user has independently confirmed the Palm build works. The Prism results
 below describe earlier revisions and do not verify the new Reset action,
@@ -312,3 +330,30 @@ Serial hardware, macOS compile/runtime, ESP32-S3 USB Host, general Palm-branded
 USB, arbitrary physical fault recovery and long-duration heap/stress use remain
 unqualified. ESP32-S3 USB Host is future work: it would be an alternative to the
 RP2350 Springboard configuration, not a simultaneous connection or role switch.
+
+## File transfers, appkeys and installation clients
+
+Use `fn_file_list_pages` to browse; `fn_file_stat`, `fn_file_read` and
+`fn_file_write` take an opaque URI and caller-owned `fn_file_io_t` scratch.
+Reads/writes are single-packet operations with explicit 32-bit offsets and
+returned byte counts. Advance by the returned count, handle EOF/partial writes,
+and keep the data buffers separate from scratch. A write at offset zero
+creates/truncates a file, including a zero-length write. `fn_file_mkdir` supports
+parents/existing-directory flags. No implicit retries or file handles are added.
+`fn_disk_inspect` similarly takes caller scratch and reports how many boot bytes
+fit; it does not mount the image. Palm's 1024-byte packet limit applies.
+
+A config application's PRC/PDB installation stays in the app: stream file reads
+into Palm OS ExgDBRead, and own replacement prompts and installation callbacks.
+The library supplies the file bytes and transport/session ownership.
+
+Legacy `fuji_set_appkey_details` uses application-owned state, may be called
+before `fn_init`, and is applied to the owned shared session before key reads or
+writes. The legacy `persist:///FujiNet/<creator><app><key>.key` names and 64/256
+byte conventions are preserved. AppStore namespace/key storage is a separate
+service and does not silently migrate those files.
+
+HTTP clients use `fn_open_headers` for authentication, content type and known
+32-bit POST/PUT body length; `fn_write` sends the body. Plain `fn_open`/`fn_close`
+and TCP URLs retain their existing shared semantics. Failed header Open replies
+receive the same uncertain-allocation reporting as other network opens.

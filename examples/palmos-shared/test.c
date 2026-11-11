@@ -1,4 +1,5 @@
 #include "NioLibClient.h"
+#include "NioLibCS1Diagnostic.h"
 
 Err NioTestGuardedGlobals(UInt16 refNum, UInt32 delta,
                          NioLibGlobalsResult *resultP, UInt16 *registersOK);
@@ -297,12 +298,46 @@ static void line(const Char *text, Coord y)
     WinDrawChars(text, StrLen(text), 4, y);
 }
 
+/* Read only the last failure record: do not open a client, probe the module,
+ * reset recovery state or overwrite the evidence while displaying it. */
+static void show_cs1_diagnostic(void)
+{
+    NioLibCS1Diagnostic d;
+    UInt16 size = sizeof(d);
+    Int16 version;
+    Char a[80], b[80], c[80];
+    version = PrefGetAppPreferences(nioLibCreator, nioCS1DiagnosticPref, &d, &size, false);
+    if (version != nioCS1DiagnosticVersion || size != sizeof(d) ||
+        d.size != sizeof(d) || d.version != nioCS1DiagnosticVersion) {
+        FrmCustomAlert(1009, "No compatible CS1 failure record.", "", "");
+        return;
+    }
+    StrPrintF(a, "Dev %02X Cmd %02X\nPhase %u Reason %u Guard %u/%u",
+        d.device, d.command, d.phase, d.reason, d.guard, d.guardDetail);
+    StrPrintF(b, "Outcome %04X Result %04X\nReply try %u Result try %u",
+        d.outcome, d.result, d.replyAttempt, d.resultAttempt);
+    StrPrintF(c, "Tick %lu -> %lu\nFault address %08lX", d.ticksStarted,
+        d.ticksFinished, d.faultAddress);
+    FrmCustomAlert(1009, a, b, c);
+    StrPrintF(a, "Want seq %u Ack %u\nResp %u -> %u", d.expectedSequence,
+        d.ack, d.sequence, d.sequenceLast);
+    StrPrintF(b, "Status %04X -> %04X\nLength %u Packet reason %u",
+        d.statusFirst, d.statusLast, d.wireLength, d.packetReason);
+    StrPrintF(c, "Word check want %04X\nComputed %04X", d.expectedCheck, d.computedCheck);
+    FrmCustomAlert(1009, a, b, c);
+}
+
 static void draw_results(void)
 {
     Char text[48];
+    UInt16 form = FrmGetActiveFormID();
     RectangleType area = {{2, 17}, {156, 119}};
+    /* Form controls are already drawn. Clear only the results above them;
+     * the network log and transport controls lie inside the old full area. */
+    if (form == 1002) area.extent.y = 101;
+    else if (form == 1010) area.extent.y = 84;
     WinEraseRectangle(&area, 0);
-    if (FrmGetActiveFormID() == 1010) {
+    if (form == 1010) {
         line("Transport settings (ABI 1.2)", 19);
         line(transport_config.transport == nioTransportSerial ? "Edit: Serial cradle" : transport_config.transport == nioTransportUSB ? "Edit: USB cradle" : "Edit: Springboard CS1", 31);
         StrPrintF(text, "Baud %lu  Flow %s", transport_config.serialBaud,
@@ -313,15 +348,14 @@ static void draw_results(void)
         line("Availability unknown until open", 91);
         return;
     }
-    if (FrmGetActiveFormID() == 1002) {
+    if (form == 1002) {
         line(net_failed ? "FAIL - networking" : "NIO library ABI 1.2", 20);
         line(net_stage, 35);
         StrPrintF(text, "FN %02X  Palm %04X", net_result, net_palm); line(text, 50);
         StrPrintF(text, "Module %u  Host %u", net_module, net_host); line(text, 65);
         StrPrintF(text, "UTC epoch %lu", net_time); line(text, 80);
         StrPrintF(text, "HTTP %u  Bytes %u", net_http, net_bytes); line(text, 95);
-        line("Run: clock + two GETs", 110);
-        line("Exit always ends client", 125);
+        line("Run: clock + two GETs", 108);
         return;
     }
     line(failed ? "FAIL" : "PASS - ABI 1.0", 20);
@@ -349,6 +383,7 @@ static Boolean handle(EventType *e)
         run_tests(); draw_results(); return true;
     }
     if (e->eType == ctlSelectEvent) {
+        if (e->data.ctlSelect.controlID == 1008) { show_cs1_diagnostic(); return true; }
         if (e->data.ctlSelect.controlID == 1011) { config_close(); FrmGotoForm(1000); return true; }
         if (e->data.ctlSelect.controlID == 1007) { fn_shutdown(); FrmGotoForm(1010); return true; }
         if (e->data.ctlSelect.controlID >= 1012 && e->data.ctlSelect.controlID <= 1017) {

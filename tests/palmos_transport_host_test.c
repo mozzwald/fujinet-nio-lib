@@ -35,7 +35,7 @@ static struct {
     int present;
     uint32_t cs1;
     uint16_t magic, version, status, echo;
-    uint16_t resp_seq, resp_len, result, resp_check;
+    uint16_t ack_seq, resp_seq, resp_len, result, resp_check;
     uint16_t resp[SBN_RESP_MAX / 2];
     uint16_t req[SBN_REQ_MAX / 2 + 4];
     unsigned req_words;
@@ -53,6 +53,8 @@ static struct {
     unsigned bad_read_passes;    /* reply reads whose first word comes back wrong */
     unsigned pending_seq, polls_left;
     int bad_pass;
+    unsigned result_reads, result_glitches;
+    uint16_t result_glitch;
 } fw;
 
 static struct { uint8_t removable, installed; uint32_t base, size; } cards[4];
@@ -107,6 +109,8 @@ static void doorbell(uint8_t seq)
     uint16_t result = SBN_RES_OK;
     uint16_t c;
 
+    fw.ack_seq = seq;
+
     if (fw.doorbells < sizeof fw.seqs) fw.seqs[fw.doorbells] = seq;
     ++fw.doorbells;
     if (fw.silent_doorbells) {
@@ -149,6 +153,7 @@ uint16_t fn_palmos_test_read(uint32_t address)
     case SBN_R_MAGIC: return fw.magic;
     case SBN_R_VERSION: return fw.version;
     case SBN_R_STATUS: return fw.status;
+    case SBN_R_ACK_SEQ: return fw.ack_seq;
     case SBN_R_RESP_SEQ:
         if (fw.pending_seq) {
             if (fw.polls_left) {
@@ -160,7 +165,10 @@ uint16_t fn_palmos_test_read(uint32_t address)
         }
         return fw.resp_seq;
     case SBN_R_RESP_LEN: return fw.resp_len;
-    case SBN_R_RESULT: return fw.result;
+    case SBN_R_RESULT:
+        ++fw.result_reads;
+        if (fw.result_glitches) { --fw.result_glitches; return fw.result_glitch; }
+        return fw.result;
     case SBN_R_RESP_CHECK: return fw.resp_check;
     case SBN_R_ECHO: return fw.echo;
     default: return 0;
@@ -665,8 +673,31 @@ static void test_through_the_library(void)
     CHECK("and is not replayed", fw.doorbells == 2);
 }
 
+static void test_result_read_validation(void)
+{
+    static const uint8_t req[2] = {1, 2}, reply[2] = {3, 4};
+    uint8_t resp[4];
+    uint16_t got;
+    reset(); set_reply(reply, sizeof reply);
+    fw.result_glitch = SBN_RES_BAD_CHECK; fw.result_glitches = 1;
+    CHECK("single false rejection recovers", exchange(req, 2, resp, 4, &got) == SBN_RES_OK);
+    CHECK("completed request not replayed", fw.doorbells == 1 && fw.result_reads == 3);
+    CHECK("reply preserved", got == 2 && !memcmp(resp, reply, 2));
+
+    reset(); set_reply(reply, sizeof reply);
+    fw.result_glitch = SBN_RES_TIMEOUT; fw.result_glitches = 1;
+    CHECK("single false timeout recovers", exchange(req, 2, resp, 4, &got) == SBN_RES_OK);
+    CHECK("timeout glitch not replayed", fw.doorbells == 1);
+
+    reset(); set_reply(reply, sizeof reply);
+    fw.result_glitch = SBN_RES_BAD_CHECK; fw.result_glitches = 4;
+    CHECK("inconsistent rejection bounded", exchange(req, 2, resp, 4, &got) == FN_PALMOS_BAD_READ);
+    CHECK("nonempty reply forbids replay", fw.doorbells == 1 && fw.result_reads == 4 && !got);
+}
+
 int main(void)
 {
+    test_result_read_validation();
     test_platform_identity();
     test_open_finds_module();
     test_open_skips_other_cards();

@@ -19,6 +19,29 @@ uint16_t nl_original_exchange(const uint8_t *, uint16_t, uint8_t *, uint16_t, ui
 typedef struct { UInt32 magic, base; UInt16 sequence, reserved; } Pending;
 static UInt16 candidate_card, invalid, posted, ambiguous, last_result;
 static UInt32 started, budget;
+NioLibCS1Diagnostic nl_cs1_diag;
+static Boolean diagnostic_saved;
+
+void nl_cs1_diagnostic_begin(void) { diagnostic_saved = false; }
+
+/* First failed exchange per foreground client, retained across unload. This
+ * best-effort diagnostic never clears ownership or changes an error result. */
+static void diagnostic_save(UInt16 result)
+{
+    if (!result || diagnostic_saved) return;
+    nl_cs1_diag.outcome = result;
+    nl_cs1_diag.ticksFinished = TimGetTicks();
+    PrefSetAppPreferences(nioLibCreator, nioCS1DiagnosticPref,
+        nioCS1DiagnosticVersion, &nl_cs1_diag, sizeof(nl_cs1_diag), false);
+    diagnostic_saved = true;
+}
+
+UInt16 nl_cs1_guard_result(void)
+{
+    if (!invalid) return 0;
+    return nl_cs1_diag.guard == nioCS1GuardDeadline ?
+        FN_PALMOS_NO_ANSWER : FN_PALMOS_BAD_READ;
+}
 
 static Boolean supported(void)
 {
@@ -41,12 +64,21 @@ static Boolean mapping_valid(void)
     UInt8 installed = 0;
     UInt32 base = 0, size = 0;
     UInt16 card = _fn_palmos_card ? _fn_palmos_card : candidate_card;
-    if (!_fn_palmos_cs1 || !card ||
-        nl_card_attr(card, 1, &installed) || !installed ||
-        nl_card_attr(card, 3, &base) || nl_card_attr(card, 4, &size) ||
-        !size || base + size < base || base + size != _fn_palmos_cs1 ||
-        (_fn_palmos_cs0 && base != _fn_palmos_cs0)) {
+    UInt16 detail = 0;
+    if (!_fn_palmos_cs1 || !card) detail = 1;
+    else if (nl_card_attr(card, 1, &installed)) detail = 2;
+    else if (!installed) detail = 3;
+    else if (nl_card_attr(card, 3, &base)) detail = 4;
+    else if (nl_card_attr(card, 4, &size)) detail = 5;
+    else if (!size || base + size < base) detail = 6;
+    else if (base + size != _fn_palmos_cs1) detail = 7;
+    else if (_fn_palmos_cs0 && base != _fn_palmos_cs0) detail = 8;
+    if (detail) {
         invalid = 1;
+        if (!nl_cs1_diag.guard) {
+            nl_cs1_diag.guard = nioCS1GuardMapping;
+            nl_cs1_diag.guardDetail = detail;
+        }
         return false;
     }
     return true;
@@ -58,6 +90,8 @@ void nl_deadline(UInt16 milliseconds)
     budget = ((UInt32)milliseconds * SysTicksPerSecond() + 999) / 1000;
     if (!budget) budget = 1;
     invalid = 0;
+    nl_cs1_diag.guard = 0;
+    nl_cs1_diag.guardDetail = 0;
     posted = ambiguous = 0; last_result = 0xffff;
 }
 
@@ -65,6 +99,19 @@ int nl_expired(UInt32 start, UInt32 wait)
 {
     UInt32 now = TimGetTicks();
     return invalid || now - started >= budget || now - start > wait;
+}
+
+/* Keep sticky CS1 access failure separate from Serial/USB sub-call timeouts.
+ * The latter share nl_expired's predicate but retain their own I/O policy. */
+int nl_cs1_expired(UInt32 start, UInt32 wait)
+{
+    if (invalid) return true;
+    if (nl_expired(start, wait)) {
+        invalid = 1;
+        if (!nl_cs1_diag.guard) nl_cs1_diag.guard = nioCS1GuardDeadline;
+        return true;
+    }
+    return false;
 }
 
 static Boolean pending_get(Pending *p)
@@ -100,16 +147,24 @@ Err nl_cs1_reset(void)
 
 UInt16 nl_bus_read(UInt32 address)
 {
-    if (nl_expired(started, budget)) { invalid = 1; return 0; }
-    if (!mapping_valid()) return 0;
+    if (nl_cs1_expired(started, budget) || !mapping_valid()) {
+        if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
+        return 0;
+    }
     return *(volatile UInt16 *)address;
 }
 
 void nl_bus_write(UInt32 address, UInt16 value)
 {
-    if (!mapping_valid() || nl_expired(started, budget)) return;
+    if (nl_cs1_expired(started, budget) || !mapping_valid()) {
+        if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
+        return;
+    }
     if (address == _fn_palmos_cs1 + SBN_W(SBN_W_DOORBELL)) {
-        if (!pending_set(_fn_palmos_cs1, value)) { invalid = 1; return; }
+        if (!pending_set(_fn_palmos_cs1, value)) {
+            invalid = 1; nl_cs1_diag.guard = nioCS1GuardPreference;
+            nl_cs1_diag.faultAddress = address; return;
+        }
         if (!mapping_valid()) {
             /* We know this doorbell was never posted. */
             pending_set(0, 0);
@@ -133,6 +188,11 @@ static Boolean settled(UInt16 seq, UInt16 *sequenceP)
         ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
         response = FN_PALMOS_RD(SBN_R_RESP_SEQ);
         last = FN_PALMOS_RD(SBN_R_STATUS);
+        if (nl_cs1_diag.phase == nioCS1PhaseSync) {
+            nl_cs1_diag.statusFirst = first; nl_cs1_diag.statusLast = last;
+            nl_cs1_diag.ack = ack; nl_cs1_diag.sequence = response;
+            nl_cs1_diag.sequenceLast = response; nl_cs1_diag.expectedSequence = seq;
+        }
         if (invalid) return false;
         if (((first | last) & SBN_ST_BUSY) || ack != response ||
             response > 255 || (seq && response != seq)) {
@@ -244,11 +304,15 @@ Boolean nl_payload_valid(const uint8_t *request, const uint8_t *response,
 Boolean nl_cs1_reply_valid(const UInt8 *request, const UInt8 *response,
                            UInt16 got, UInt16 wireLength, UInt16 capacity)
 {
-    return got >= FN_HEADER_SIZE && wireLength == got &&
-        response[0] == request[0] && response[1] == request[1] &&
-        FN_READ_LE16(response, 2) == got &&
-        fn_calc_packet_checksum(response, got) == response[FN_CHECKSUM_OFFSET] &&
-        nl_payload_valid(request, response, got, capacity);
+    UInt16 reason = 0;
+    if (got < FN_HEADER_SIZE || wireLength != got) reason = 1;
+    else if (response[0] != request[0] || response[1] != request[1]) reason = 2;
+    else if (FN_READ_LE16(response, 2) != got) reason = 3;
+    else if (fn_calc_packet_checksum(response, got) != response[FN_CHECKSUM_OFFSET]) reason = 4;
+    else if (!nl_payload_valid(request, response, got, capacity)) reason = 5;
+    nl_cs1_diag.packetReason = reason;
+    if (reason) nl_cs1_diag.reason = nioCS1ReasonPacket;
+    return !reason;
 }
 
 /* A valid final reply may outlive a failed completion snapshot. EndClient
@@ -267,13 +331,23 @@ uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
 {
     UInt16 result;
     posted = ambiguous = 0;
+    MemSet(&nl_cs1_diag, sizeof(nl_cs1_diag), 0);
+    nl_cs1_diag.size = sizeof(nl_cs1_diag);
+    nl_cs1_diag.version = nioCS1DiagnosticVersion;
+    nl_cs1_diag.device = request[0]; nl_cs1_diag.command = request[1];
+    nl_cs1_diag.ticksStarted = TimGetTicks();
+    nl_cs1_diag.phase = nioCS1PhaseSync;
     *got = 0;
-    if (!synchronize() || nl_expired(started, budget)) {
+    if (!synchronize() || nl_cs1_expired(started, budget)) {
         last_result = FN_PALMOS_NO_ANSWER;
+        nl_cs1_diag.reason = nl_cs1_diag.guard ? nioCS1ReasonLocal : nioCS1ReasonSync;
+        diagnostic_save(last_result);
         return last_result;
     }
     result = nl_original_exchange(request, length, response, capacity, got);
     last_result = result;
+    if (nl_cs1_diag.guard) nl_cs1_diag.reason = nioCS1ReasonLocal;
+    diagnostic_save(result);
     /* Older ABI-4 firmware can report NO_HOST after a disconnect even if a
      * request was sent; conservatively treat that outcome as ambiguous too. */
     ambiguous = posted && result != SBN_RES_OK &&

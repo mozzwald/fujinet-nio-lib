@@ -136,7 +136,7 @@ Err NioLibGetVersion(UInt16 refNum, NioLibVersion *v)
     (void)refNum;
     if (!v || v->size != sizeof(*v)) return nioLibErrParam;
     v->abiMajor = nioLibAbiMajor; v->abiMinor = nioLibAbiMinor;
-    v->implementation = 8;
+    v->implementation = 11;
     return errNone;
 }
 
@@ -145,7 +145,7 @@ Err NioLibGetCapabilities(UInt16 refNum, UInt32 *capsP)
     (void)refNum;
     if (!capsP) return nioLibErrParam;
     *capsP = nioLibCapA4Globals | nioLibCapTestOnly | nioLibCapNetwork |
-             nioLibCapClock | nioLibCapClient | nioLibCapTransports | nioLibCapUSB | nioLibCapJSONQuery | nioLibCapRecovery;
+             nioLibCapClock | nioLibCapClient | nioLibCapTransports | nioLibCapUSB | nioLibCapJSONQuery | nioLibCapRecovery | nioLibCapServices;
     return errNone;
 }
 

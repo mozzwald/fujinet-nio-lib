@@ -72,7 +72,8 @@ class NetworkMachine(foundation.PalmMachine):
         self.stack_low = min(self.stack_low, uc.reg_read(UC_M68K_REG_A7))
         if bytes(uc.mem_read(pc, 2)) != b'\x4e\x4f': return
         trap, sp = self.read16(pc + 2), uc.reg_read(UC_M68K_REG_A7)
-        if 0xa801 <= trap <= 0xa817:
+        if 0xa801 <= trap <= max(int(v, 16) for v in json.loads(
+                (foundation.OUT / 'verification.json').read_text())['dispatch'].values()):
             target = self.read32(self.ENTRY) + struct.unpack('>h', uc.mem_read(
                 self.read32(self.ENTRY) + 2 * (trap - 0xa800), 2))[0]
             uc.mem_write(sp - 4, struct.pack('>I', pc + 4))
@@ -260,6 +261,28 @@ class NetworkTests(unittest.TestCase):
             'scope': 'covered compiled library/client paths; mocked OS has no real OS stack cost',
             'physical_measurement': False}, indent=2) + '\n')
 
+    def test_code_resource_rebases_preserve_calls_globals_and_network(self):
+        # Palm may place the installed resource at different addresses. Exercise
+        # the enlarged code image, relocated pointers and real transport calls.
+        for base in (0x10000, 0x51000, 0x90000):
+            with self.subTest(code_base=hex(base)):
+                machine = type('RebasedNetworkMachine', (NetworkMachine,), {'CODE': base})
+                m = machine()
+                self.assertEqual(m.open(), 0)
+                self.assertEqual(m.test_globals(1)[0], 0)
+                err, token, result = m.begin()
+                self.assertEqual((err, result), (0, 0))
+                self.assertEqual(m.net_open(token)[0], 0)
+                self.assertEqual(m.call('NioLibClockGet', struct.pack('>HIII',
+                    7, token, 0x9000, 0x9010)), 0)
+                self.assertEqual(m.read16(0x9010), 0)
+                self.assertEqual(bytes(m.uc.mem_read(0x9000, 8)),
+                                 bytes.fromhex('00f1536500000000'))
+                self.assertEqual(m.end(token)[:2], (0, 0))
+                self.assertEqual(m.close(), (0, 0))
+                NetworkMachine.peak_stack = max(getattr(NetworkMachine, 'peak_stack', 0),
+                                                machine.peak_stack)
+
     def test_canonical_clock_two_handles_and_cleanup(self):
         m = NetworkMachine(); self.assertEqual(m.open(), 0)
         err, token, status = m.begin(); self.assertEqual((err, status), (0, 0))
@@ -320,9 +343,9 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(m.end(token)[0], 0x8007)
         m.current_app = 1001
         self.assertEqual(m.clock(token + 1)[0], 0x8007)
-        m.uc.mem_write(m.globals + m.symbols['busy'], b'\x00\x01')
+        m.uc.mem_write(m.globals + m.symbols['nl_busy'], b'\x00\x01')
         self.assertEqual(m.clock(token)[0], 0x8006)
-        m.uc.mem_write(m.globals + m.symbols['busy'], b'\x00\x00')
+        m.uc.mem_write(m.globals + m.symbols['nl_busy'], b'\x00\x00')
         self.assertEqual(m.end(token)[:2], (0, 0))
         _, next_token, _ = m.begin()
         self.assertNotEqual(next_token, token)
@@ -446,10 +469,10 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(m.read16(0x9000), handle)
         m.end(token); m.close()
 
-    def test_no_host_is_not_retried_or_claimed_definitely_unsent(self):
+    def test_mutating_no_host_is_not_retried_or_claimed_definitely_unsent(self):
         m = NetworkMachine(); m.open(); _, token, _ = m.begin()
         m.forced_result = 1
-        self.assertNotEqual(m.clock(token)[1], 0)
+        self.assertNotEqual(m.net_open(token)[2], 0)
         self.assertEqual(m.doorbells, 1)
         err, status, report = m.end(token)
         self.assertEqual(err, 0)
