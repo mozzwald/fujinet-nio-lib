@@ -172,7 +172,14 @@ as safe display defaults but prevent initialization until explicitly repaired.
 **Springboard** validates Handspring support and card mapping instead of using
 a hardcoded physical address. Its shared-only guards preserve 16-bit bus
 operations, request/reply sequences and a pending-sequence tombstone, with
-mapping/deadline checks during access. It does not change RP2350 timing or ROM.
+mapping/deadline checks during access. Before posting a request or retiring a
+completed pending marker, it requires two consecutive matching idle snapshots
+of ACK and reply sequences, using at most four snapshots within the existing deadline.
+The next request sequence comes from that validated snapshot. A transient
+inconsistent read can settle; persistent BUSY, mismatched/out-of-range sequences,
+invalid mappings and unresolved pending operations still prevent transmission.
+This only re-reads registers; it does not reset or replay a request. It does not
+change RP2350 timing or ROM.
 
 **Serial** uses New Serial Manager where present and falls back to the legacy
 Serial Library. It selects the cradle port, 8N1, 9600/19200/38400/57600/115200 baud

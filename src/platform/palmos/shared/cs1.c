@@ -120,27 +120,47 @@ void nl_bus_write(UInt32 address, UInt16 value)
     *(volatile UInt16 *)address = value;
 }
 
-static Boolean settled(UInt16 seq)
+/* Register reads are independent bus cycles. A single inconsistent snapshot
+ * must not abort an otherwise completed transfer. Require two consecutive
+ * matching idle snapshots, with at most four attempts (no new wait deadline).
+ * Only read state here: an unresolved request is never reset or replayed. */
+static Boolean settled(UInt16 seq, UInt16 *sequenceP)
 {
-    UInt16 first, ack, response, last;
-    first = FN_PALMOS_RD(SBN_R_STATUS);
-    ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
-    response = FN_PALMOS_RD(SBN_R_RESP_SEQ);
-    last = FN_PALMOS_RD(SBN_R_STATUS);
-    return !invalid && !((first | last) & SBN_ST_BUSY) && ack == response &&
-           (!seq || response == seq);
+    UInt16 first, ack, response, last, previous = 0, attempt;
+    Boolean stable = false;
+    for (attempt = 0; attempt < 4; attempt++) {
+        first = FN_PALMOS_RD(SBN_R_STATUS);
+        ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
+        response = FN_PALMOS_RD(SBN_R_RESP_SEQ);
+        last = FN_PALMOS_RD(SBN_R_STATUS);
+        if (invalid) return false;
+        if (((first | last) & SBN_ST_BUSY) || ack != response ||
+            response > 255 || (seq && response != seq)) {
+            stable = false;
+            continue;
+        }
+        if (stable && previous == response) {
+            if (sequenceP) *sequenceP = response;
+            return true;
+        }
+        previous = response;
+        stable = true;
+    }
+    return false;
 }
 
 static Boolean synchronize(void)
 {
     Pending p;
+    UInt16 sequence;
     if (!mapping_valid() || !pending_get(&p)) return false;
     if (p.sequence) {
-        if (p.base != _fn_palmos_cs1 || !settled(p.sequence) || !pending_set(0, 0))
+        if (p.base != _fn_palmos_cs1 || !settled(p.sequence, NULL) || !pending_set(0, 0))
             return false;
     }
-    if (!settled(0)) return false;
-    _fn_palmos_seq = (UInt8)FN_PALMOS_RD(SBN_R_RESP_SEQ);
+    if (!settled(0, &sequence)) return false;
+    /* Reuse the checked snapshot; do not seed from another unverified read. */
+    _fn_palmos_seq = (UInt8)sequence;
     return !invalid;
 }
 
@@ -246,6 +266,6 @@ uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
         result != SBN_RES_BAD_LEN && result != SBN_RES_BAD_CHECK && result != SBN_RES_REFUSED;
     /* Completion may race the local deadline. Discard a finalized old reply,
      * never accept it as a new request's answer. Unresolved markers persist. */
-    if (!invalid && settled(_fn_palmos_seq)) pending_set(0, 0);
+    if (!invalid && settled(_fn_palmos_seq, NULL)) pending_set(0, 0);
     return result;
 }
