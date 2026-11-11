@@ -121,6 +121,10 @@ UInt16 nl_transport_probe(UInt16 *host, UInt16 *busy)
     /* Serial manager presence is not proof of a cable or an NIO peer. */
     return nl_serial_pending() ? FN_ERR_BUSY : FN_OK;
 }
+void nl_transport_retire(void)
+{
+    if (active == nioTransportSpringboard) nl_cs1_retire();
+}
 UInt16 nl_transport_pending(void)
 {
     return active == nioTransportUSB ? nl_usb_pending() :

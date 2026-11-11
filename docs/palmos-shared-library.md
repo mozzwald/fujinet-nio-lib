@@ -179,7 +179,12 @@ The next request sequence comes from that validated snapshot. A transient
 inconsistent read can settle; persistent BUSY, mismatched/out-of-range sequences,
 invalid mappings and unresolved pending operations still prevent transmission.
 This only re-reads registers; it does not reset or replay a request. It does not
-change RP2350 timing or ROM.
+change RP2350 timing or ROM. Full packet validation runs inside the bounded
+held-reply read loop and uses its captured wire length. Corrupt checksums,
+packet echoes or metadata re-read the held reply without sending the command
+again. EndClient can recheck and retire the exact completed pending sequence;
+it still reports earlier ambiguous command outcomes and preserves unmatched
+pending markers.
 
 **Serial** uses New Serial Manager where present and falls back to the legacy
 Serial Library. It selects the cradle port, 8N1, 9600/19200/38400/57600/115200 baud

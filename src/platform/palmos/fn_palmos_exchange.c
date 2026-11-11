@@ -39,12 +39,14 @@ static void send_request(const uint8_t *req, uint16_t len)
 
 /* Read the reply words, keep at most cap bytes, check every word. Zero if
  * the length or the check did not read back right. */
-static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len)
+static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len,
+                          uint16_t *wire_len)
 {
     fn_palmos_port_t port = FN_PALMOS_PORT(_fn_palmos_cs1 + SBN_R_RESP);
     uint16_t n = FN_PALMOS_RD(SBN_R_RESP_LEN), want = FN_PALMOS_RD(SBN_R_RESP_CHECK);
     uint16_t keep, pairs, words, w, check = 0;
 
+    *wire_len = n;
     if (n > SBN_RESP_MAX) return 0;
     keep = n < cap ? n : cap;
     pairs = keep >> 1;
@@ -74,7 +76,7 @@ static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len)
 uint16_t fn_palmos_exchange(const uint8_t *req, uint16_t len, uint8_t *resp, uint16_t cap,
                             uint16_t *resp_len)
 {
-    uint16_t tries, result = SBN_RES_BAD_CHECK;
+    uint16_t tries, wire_len, result = SBN_RES_BAD_CHECK;
     uint32_t start, wait = (uint32_t)REPLY_WAIT_SECONDS * SysTicksPerSecond();
 
     *resp_len = 0;
@@ -91,8 +93,15 @@ uint16_t fn_palmos_exchange(const uint8_t *req, uint16_t len, uint8_t *resp, uin
     }
     /* Only a good result has a reply to read. */
     if (result != SBN_RES_OK) return result;
-    for (tries = 0; tries <= READ_RETRIES; tries++)
-        if (read_reply(resp, cap, resp_len)) return result;
+    for (tries = 0; tries <= READ_RETRIES; tries++) {
+        if (!read_reply(resp, cap, resp_len, &wire_len)) continue;
+#ifdef FN_PALMOS_SHARED
+        /* Validate the same captured length/data as the word checksum. A bad
+         * read retries this held reply, never the remote command. */
+        if (!nl_cs1_reply_valid(req, resp, *resp_len, wire_len, cap)) continue;
+#endif
+        return result;
+    }
     *resp_len = 0;
     return FN_PALMOS_BAD_READ;
 }

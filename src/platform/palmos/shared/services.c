@@ -122,6 +122,7 @@ SERVICE(NioLibEndClient,
             else { ++c->uncertain; *resultP = result; }
         }
     }
+    nl_transport_retire();
     if (c->uncertain || nl_transport_pending() || uncertain_operation || nl_ambiguous()) {
         c->ambiguousOperation = 1;
         if (!*resultP) *resultP = FN_ERR_TIMEOUT;

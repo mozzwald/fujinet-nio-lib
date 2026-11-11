@@ -237,6 +237,31 @@ Boolean nl_payload_valid(const uint8_t *request, const uint8_t *response,
     return true;
 }
 
+/* Called inside the packet engine's bounded held-reply read loop. The
+ * captured wire length has already been used to checksum all response words;
+ * another register read here could reject a valid packet after a transient
+ * bus read and leave the client reporting uncertainty even after a retry. */
+Boolean nl_cs1_reply_valid(const UInt8 *request, const UInt8 *response,
+                           UInt16 got, UInt16 wireLength, UInt16 capacity)
+{
+    return got >= FN_HEADER_SIZE && wireLength == got &&
+        response[0] == request[0] && response[1] == request[1] &&
+        FN_READ_LE16(response, 2) == got &&
+        fn_calc_packet_checksum(response, got) == response[FN_CHECKSUM_OFFSET] &&
+        nl_payload_valid(request, response, got, capacity);
+}
+
+/* A valid final reply may outlive a failed completion snapshot. EndClient
+ * can retire that exact completed sequence without transmitting anything.
+ * Unknown command outcomes remain in nl_uncertain_operation. */
+void nl_cs1_retire(void)
+{
+    Pending p;
+    if (!pending_get(&p) || !p.sequence || !mapping_valid() ||
+        p.base != _fn_palmos_cs1 || !settled(p.sequence, NULL)) return;
+    pending_set(0, 0);
+}
+
 uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
                             uint8_t *response, uint16_t capacity, uint16_t *got)
 {
@@ -249,17 +274,6 @@ uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
     }
     result = nl_original_exchange(request, length, response, capacity, got);
     last_result = result;
-    /* The upstream reader checks every response word, even beyond capacity.
-     * Reject truncation/mismatched packets before a common service uses them. */
-    if (result == SBN_RES_OK && (*got < FN_HEADER_SIZE ||
-        FN_PALMOS_RD(SBN_R_RESP_LEN) != *got ||
-        response[0] != request[0] || response[1] != request[1] ||
-        FN_READ_LE16(response, 2) != *got ||
-        fn_calc_packet_checksum(response, *got) != response[FN_CHECKSUM_OFFSET] ||
-        !nl_payload_valid(request, response, *got, capacity))) {
-        result = last_result = FN_PALMOS_BAD_READ;
-        *got = 0;
-    }
     /* Older ABI-4 firmware can report NO_HOST after a disconnect even if a
      * request was sent; conservatively treat that outcome as ambiguous too. */
     ambiguous = posted && result != SBN_RES_OK &&
