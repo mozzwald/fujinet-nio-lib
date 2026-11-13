@@ -6,7 +6,6 @@
 #define CONFIG_PREF 0x4e34
 static UInt16 active;
 static UInt16 last_reply = 0xffff;
-uint8_t nl_cs1_init(void);
 void nl_cs1_close(void);
 uint8_t nl_cs1_ready(void);
 uint8_t nl_cs1_exchange_buffers(const uint8_t *, uint16_t, uint8_t *, uint16_t, uint16_t *);
@@ -61,7 +60,7 @@ uint8_t fn_transport_init(void)
     /* Corrupt/unknown saved settings are inspectable as safe defaults, but
      * must not silently open a different backend on the user's behalf. */
     if (nl_config_read(&c) == nioConfigInvalid) return FN_ERR_INVALID;
-    result = c.transport == nioTransportSpringboard ? nl_cs1_init() :
+    result = c.transport == nioTransportSpringboard ? nl_cs1_open() :
              c.transport == nioTransportSerial ? nl_serial_open(&c) : nl_usb_open();
     if (!result) active = c.transport;
     return result;

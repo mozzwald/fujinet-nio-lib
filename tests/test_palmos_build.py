@@ -39,5 +39,18 @@ class LauncherTests(unittest.TestCase):
             self.assertNotEqual(p.returncode, 0)
 
 
+class ConservativeBuildTests(unittest.TestCase):
+    def test_experimental_settings_are_rejected_before_building(self):
+        for words, write in (('8', '0'), ('16', '0'), ('32', '1'), ('0', '1')):
+            with self.subTest(words=words, write=write):
+                p = subprocess.run(
+                    ['make', '-n', '-f', 'makefiles/palmos-shared.mk',
+                     'PALMOS_CS1_BURST_WORDS=' + words,
+                     'PALMOS_CS1_BURST_WRITE=' + write],
+                    cwd=ROOT, capture_output=True, text=True)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn('CS1 bursts are unsupported', p.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -12,6 +12,13 @@ include makefiles/palmos-sdk.mk
 PALMFLAGS = -Wall -Werror -Os $(PALMOS_SDK_FLAGS) -Iinclude/palmos
 HANDSPRING_INCLUDE ?=
 SBNIO_ABI_INCLUDE ?= -I../fujinet-nio/bridges/rp2350-springboard/include
+# Only the conservative per-word validation path is supported. Reject stale
+# experimental build commands instead of silently accepting a burst setting.
+PALMOS_CS1_BURST_WORDS ?= 0
+PALMOS_CS1_BURST_WRITE ?= 0
+ifneq ($(PALMOS_CS1_BURST_WORDS):$(PALMOS_CS1_BURST_WRITE),0:0)
+$(error CS1 bursts are unsupported; PALMOS_CS1_BURST_WORDS and PALMOS_CS1_BURST_WRITE must be 0)
+endif
 LIBFLAGS = $(PALMFLAGS) -Iinclude $(SBNIO_ABI_INCLUDE) -mown-gp
 CORE = fn_state fn_init fn_shutdown fn_open fn_open_exchange fn_open_translated \
        fn_packet_build_open fn_packet_build_open_ext fn_packet_header \
@@ -85,7 +92,7 @@ all: verify
 $(B)/settings: FORCE | $(B)
 	@printf '%s\n' '$(CC) $(LIBFLAGS) $(HANDSPRING_INCLUDE) $(PALMOS_LAYOUT_PAD_BYTES) $(PALMOS_LAYOUT_PAD_POSITION)' > $@.tmp
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
-$(B)/entry.o $(B)/library.o $(B)/image.o $(B)/owner.o $(B)/services.o $(B)/json.o $(B)/cs1.o $(B)/transport.o $(B)/serial.o $(B)/usb.o $(B)/test.o $(B)/registers.o $(B)/client.o $(COREOBJS) $(SERVICECOREOBJS) $(DISKCOREOBJS) $(BACKOBJS) $(SERVICEOBJS) $(CLIENTOBJS) $(CLIENTCOMMONOBJS) $(LEGACYOBJS): $(B)/settings $(wildcard include/palmos/*.h)
+$(B)/entry.o $(B)/library.o $(B)/image.o $(B)/owner.o $(B)/services.o $(B)/json.o $(B)/cs1.o $(B)/transport.o $(B)/serial.o $(B)/usb.o $(B)/test.o $(B)/benchmark.o $(B)/registers.o $(B)/client.o $(COREOBJS) $(SERVICECOREOBJS) $(DISKCOREOBJS) $(BACKOBJS) $(SERVICEOBJS) $(CLIENTOBJS) $(CLIENTCOMMONOBJS) $(LEGACYOBJS): $(B)/settings $(wildcard include/palmos/*.h)
 
 $(B):
 	mkdir -p $@
@@ -137,7 +144,9 @@ $(B)/libr0000.bin: $(B)/NioLib
 $(B)/NioLib.prc: $(B)/libr0000.bin $(B)/nDat0000.bin
 	$(BUILD_PRC) -L -c NiL1 -n NioLib -o $@ $^
 
-$(B)/test.o: $(T)/test.c include/palmos/NioLib.h | $(B)
+$(B)/test.o: $(T)/test.c $(T)/benchmark.h include/palmos/NioLib.h | $(B)
+	$(CC) $(PALMFLAGS) -Iinclude -c $< -o $@
+$(B)/benchmark.o: $(T)/benchmark.c $(T)/benchmark.h | $(B)
 	$(CC) $(PALMFLAGS) -Iinclude -c $< -o $@
 $(B)/registers.o: $(T)/registers.S | $(B)
 	$(CC) $(PALMFLAGS) -c $< -o $@
@@ -147,13 +156,13 @@ $(B)/libniolib-client.a: $(B)/client.o $(CLIENTOBJS) $(CLIENTCOMMONOBJS)
 	m68k-palmos-ar rcs $@ $^
 $(B)/service-link.o: tests/palmos_service_link.c $(wildcard include/palmos/*.h) $(B)/settings | $(B)
 	$(CC) $(PALMFLAGS) -Iinclude -c $< -o $@
-$(B)/NioLibTest: $(B)/test.o $(B)/registers.o $(B)/service-link.o $(B)/libniolib-client.a
+$(B)/NioLibTest: $(B)/test.o $(B)/benchmark.o $(B)/registers.o $(B)/service-link.o $(B)/libniolib-client.a
 	$(CC) $(PALMFLAGS) -Wl,-Map,$@.map -o $@ $^
 $(B)/test-resources.stamp: $(T)/test.rcp | $(B)
 	$(PILRC) -q $< $(B)
 	touch $@
 $(B)/NioLibTest.prc: $(B)/NioLibTest $(B)/test-resources.stamp
-	$(BUILD_PRC) -c NiT1 -n NioLibTest -o $@ $(B)/NioLibTest $(B)/tFRM03e8.bin $(B)/tFRM03ea.bin $(B)/tFRM03f2.bin $(B)/tAIN03e8.bin $(B)/Talt03f1.bin
+	$(BUILD_PRC) -c NiT1 -n NioLibTest -o $@ $(B)/NioLibTest $(B)/tFRM03e8.bin $(B)/tFRM03ea.bin $(B)/tFRM03f2.bin $(B)/tFRM03fc.bin $(B)/tAIN03e8.bin $(B)/Talt03f1.bin
 
 verify: $(B)/NioLib.prc $(B)/NioLibTest.prc
 	$(PYTHON) scripts/palmos_shared_image.py audit $(B)

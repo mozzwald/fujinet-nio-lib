@@ -374,6 +374,18 @@ class CS1ResultTests(unittest.TestCase):
         self.assertEqual((m.doorbells, m.result_reads, m.now), (1, 4, 0))
         self.assertEqual(m.end(token)[1], 0)
 
+    def test_samples_explain_changing_valid_empty_results_without_authorizing_replay(self):
+        m, token = self.machine()
+        m.forced_result = 2
+        m.result_faults.extend((0, 2, 0, 2))
+        self.assertEqual(m.clock(token)[1], 5)
+        data = m.preferences[0x4e694c31, 0x4e38][1]
+        samples = [struct.unpack('>9H', data[12+18*i:30+18*i]) for i in range(4)]
+        self.assertEqual([row[8] for row in samples], [0, 0x40, 0x40, 0x40])
+        self.assertEqual([row[3] for row in samples], [0, 2, 0, 2])
+        self.assertEqual((m.doorbells, m.result_reads), (1, 4))
+        self.assertEqual(m.end(token)[1], 0)
+
     def test_actual_request_rejection_can_still_be_retried(self):
         m, token = self.machine()
         m.bad_check = 1
@@ -403,10 +415,57 @@ class CS1ResultTests(unittest.TestCase):
         before = (m.mmio, dict(m.preferences), dict(m.features))
         m.call('show_cs1_diagnostic', b'', app=True, a5=m.app_a5)
         self.assertEqual((m.mmio, m.preferences, m.features), before)
-        self.assertEqual(len(m.dialogs), 2)
+        self.assertEqual(len(m.dialogs), 3)
         self.assertIn('Phase 4 Reason 4 Guard 0', m.dialogs[0][0])
         self.assertIn('Outcome FFFE Result 0004', m.dialogs[0][1])
         self.assertIn('Want seq 1 Ack 1', m.dialogs[1][0])
+        self.assertEqual(m.dialogs[2][0], 'RESULT 0004/0004\n       0004/0004')
+        self.assertEqual(m.dialogs[2][1], 'Reject 20/20/20/20')
+
+    def test_failed_first_payload_snapshot_is_retained_after_a_successful_file_read(self):
+        # Reproduce the reported shape: prior transfer succeeds, then four
+        # inconsistent RESULT samples reject the next 273-byte held reply.
+        kind = type('FileResultMachine', (ResultMachine, ServiceMachine), {})
+        m = kind(); self.assertEqual(m.open(), 0)
+        m.regs[6] = m.regs[8] = 108
+        err, token, result = m.begin(); self.assertEqual((err, result), (0, 0))
+        m.files[b'host:/App.prc'] = bytes(range(256))
+        m.uc.mem_write(0x9000, struct.pack('>IH', 0x9100, 512))
+        m.uc.mem_write(0x9400, b'host:/App.prc\0')
+        args = struct.pack('>HIIIIIHII', 7, token, 0x9000, 0x9400,
+                           0, 0x9600, 256, 0x9500, 0x9700)
+        self.assertEqual(m.call('NioLibFileRead', args), 0)
+        self.assertEqual(m.read16(0x9700), 0)
+        m.result_faults.extend((4, 0, 4, 0))
+        m.uc.mem_write(0x9600, b'\xcc' * 256)
+        self.assertEqual(m.call('NioLibFileRead', args), 0)
+        self.assertEqual(m.read16(0x9700), 5)
+        self.assertEqual(m.sequences, [109, 110])
+        self.assertEqual(bytes(m.uc.mem_read(0x9600, 256)), b'\xcc' * 256)
+        d = self.diagnostic(m)
+        self.assertEqual(d[2:8], (0xfe, 3, 4, 4, 0, 0))
+        self.assertEqual((d[14], d[16], d[17], d[18]), (273, 0, 0, 4))
+        version, data = m.preferences[0x4e694c31, 0x4e38]
+        header = struct.unpack('>4HI', data[:12])
+        samples = [struct.unpack('>9H', data[12+18*i:30+18*i]) for i in range(4)]
+        self.assertEqual((version, header), (1, (84, 1, 4, 110, d[22])))
+        self.assertEqual([row[3] for row in samples], [4, 0, 4, 0])
+        self.assertEqual([row[8] for row in samples], [0x20, 0, 0x20, 0])
+        self.assertEqual([row[4] for row in samples], [273, 0, 273, 0])
+        evidence = m.preferences[0x4e694c31, 0x4e38]
+        self.assertEqual(m.end(token)[1], 0)
+        self.assertEqual(m.preferences[0x4e694c31, 0x4e38], evidence)
+        self.assertEqual(m.doorbells, 2)
+
+    def test_viewer_does_not_pair_stale_samples_with_a_different_failure(self):
+        m, token = self.machine(DiagnosticViewerMachine)
+        m.result_faults.extend([4] * 4)
+        self.assertEqual(m.clock(token)[1], 5)
+        version, data = m.preferences[0x4e694c31, 0x4e38]
+        stale = bytearray(data); stale[11] ^= 1  # ticksStarted mismatch
+        m.preferences[0x4e694c31, 0x4e38] = version, bytes(stale)
+        m.call('show_cs1_diagnostic', b'', app=True, a5=m.app_a5)
+        self.assertEqual(len(m.dialogs), 2)
 
     def test_viewer_rejects_missing_or_incompatible_record_without_bus_access(self):
         for data in (None, (2, b'\0' * 56), (1, b'\0' * 12), (1, b'\0' * 56)):
@@ -418,7 +477,7 @@ class CS1ResultTests(unittest.TestCase):
 
     def test_results_redraw_never_erases_form_controls(self):
         resources = (foundation.ROOT / 'examples/palmos-shared/test.rcp').read_text()
-        for form in (1000, 1002, 1010):
+        for form in (1000, 1002, 1010, 1020):
             with self.subTest(form=form):
                 m = DiagnosticViewerMachine(); m.form = form
                 # The foundation page normally receives this string from run_tests.

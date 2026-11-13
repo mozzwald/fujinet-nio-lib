@@ -8,6 +8,11 @@
 
 Err nl_hs_get(UInt16 card, UInt16 attr, void *value)
     __attribute__((__callseq__("move.w #6,-(%%sp); trap #15; dc.w 0xA349")));
+/* HsExt.h selector 9, the documented HsCardErrTry/Catch list accessor.
+ * Keep this narrow declaration beside selector 6 above: the original SDK
+ * header's CRLF macro continuations are rejected by prc-tools GCC 2.95. */
+void **nl_hs_catch_list(void)
+    __attribute__((__callseq__("move.w #9,-(%%sp); trap #15; dc.w 0xA349")));
 uint16_t nl_original_exchange(const uint8_t *, uint16_t, uint8_t *, uint16_t, uint16_t *);
 
 /* This is an ownership tombstone, NOT a saved network session/configuration.
@@ -20,7 +25,36 @@ typedef struct { UInt32 magic, base; UInt16 sequence, reserved; } Pending;
 static UInt16 candidate_card, invalid, posted, ambiguous, last_result;
 static UInt32 started, budget;
 NioLibCS1Diagnostic nl_cs1_diag;
+NioLibCS1Samples nl_cs1_samples;
 static Boolean diagnostic_saved;
+/* Last attempted word address, not a caller pointer. Volatile because a card
+ * exception unwinds the access helper back to card_run's saved register set. */
+static volatile UInt32 access_address;
+enum { cardInit, cardProbe, cardBegin, cardExchange, cardRetire };
+typedef struct {
+    const UInt8 *request;
+    UInt16 length;
+    UInt8 *response;
+    UInt16 capacity, *got;
+} CardExchange;
+static UInt16 card_run(volatile UInt16 operation, void *context);
+
+static void diagnostic_start(const UInt8 *request)
+{
+    MemSet(&nl_cs1_diag, sizeof(nl_cs1_diag), 0);
+    nl_cs1_diag.size = sizeof(nl_cs1_diag);
+    nl_cs1_diag.version = nioCS1DiagnosticVersion;
+    if (request) {
+        nl_cs1_diag.device = request[0]; nl_cs1_diag.command = request[1];
+    }
+    nl_cs1_diag.ticksStarted = TimGetTicks();
+    nl_cs1_diag.phase = nioCS1PhaseSync;
+    /* Only populated slots are saved; do not memset another array per read. */
+    nl_cs1_samples.size = sizeof(nl_cs1_samples);
+    nl_cs1_samples.version = nioCS1SamplesVersion;
+    nl_cs1_samples.count = nl_cs1_samples.expectedSequence = 0;
+    nl_cs1_samples.ticksStarted = nl_cs1_diag.ticksStarted;
+}
 
 void nl_cs1_diagnostic_begin(void) { diagnostic_saved = false; }
 
@@ -33,6 +67,9 @@ static void diagnostic_save(UInt16 result)
     nl_cs1_diag.ticksFinished = TimGetTicks();
     PrefSetAppPreferences(nioLibCreator, nioCS1DiagnosticPref,
         nioCS1DiagnosticVersion, &nl_cs1_diag, sizeof(nl_cs1_diag), false);
+    if (nl_cs1_diag.reason == nioCS1ReasonSnapshot && nl_cs1_samples.count == 4)
+        PrefSetAppPreferences(nioLibCreator, nioCS1SamplesPref,
+            nioCS1SamplesVersion, &nl_cs1_samples, sizeof(nl_cs1_samples), false);
     diagnostic_saved = true;
 }
 
@@ -50,13 +87,20 @@ static Boolean supported(void)
     return FtrGet('hsEx', 0, &version) == errNone && version != 0;
 }
 
-Err nl_card_attr(UInt16 card, UInt16 attr, void *value)
+/* The caller has just checked the extensions feature. Keep discovery's
+ * candidate-card update here; never cache installation/base/size values. */
+static Err card_attr_supported(UInt16 card, UInt16 attr, void *value)
 {
     Err err;
-    if (!supported()) return nioLibErrParam;
     err = nl_hs_get(card, attr, value);
     if (!err && attr == 4) candidate_card = card;
     return err;
+}
+
+Err nl_card_attr(UInt16 card, UInt16 attr, void *value)
+{
+    if (!supported()) return nioLibErrParam;
+    return card_attr_supported(card, attr, value);
 }
 
 static Boolean mapping_valid(void)
@@ -66,10 +110,13 @@ static Boolean mapping_valid(void)
     UInt16 card = _fn_palmos_card ? _fn_palmos_card : candidate_card;
     UInt16 detail = 0;
     if (!_fn_palmos_cs1 || !card) detail = 1;
-    else if (nl_card_attr(card, 1, &installed)) detail = 2;
+    /* HsExt availability is system-wide. Check it once for this validation,
+     * not once per attribute. All three dynamic attributes remain per access. */
+    else if (!supported()) detail = 2;
+    else if (card_attr_supported(card, 1, &installed)) detail = 2;
     else if (!installed) detail = 3;
-    else if (nl_card_attr(card, 3, &base)) detail = 4;
-    else if (nl_card_attr(card, 4, &size)) detail = 5;
+    else if (card_attr_supported(card, 3, &base)) detail = 4;
+    else if (card_attr_supported(card, 4, &size)) detail = 5;
     else if (!size || base + size < base) detail = 6;
     else if (base + size != _fn_palmos_cs1) detail = 7;
     else if (_fn_palmos_cs0 && base != _fn_palmos_cs0) detail = 8;
@@ -147,16 +194,19 @@ Err nl_cs1_reset(void)
 
 UInt16 nl_bus_read(UInt32 address)
 {
-    if (nl_cs1_expired(started, budget) || !mapping_valid()) {
+    if (nl_cs1_expired(started, budget) || !mapping_valid() ||
+        nl_cs1_expired(started, budget)) {
         if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
         return 0;
     }
+    access_address = address;
     return *(volatile UInt16 *)address;
 }
 
 void nl_bus_write(UInt32 address, UInt16 value)
 {
-    if (nl_cs1_expired(started, budget) || !mapping_valid()) {
+    if (nl_cs1_expired(started, budget) || !mapping_valid() ||
+        nl_cs1_expired(started, budget)) {
         if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
         return;
     }
@@ -165,13 +215,18 @@ void nl_bus_write(UInt32 address, UInt16 value)
             invalid = 1; nl_cs1_diag.guard = nioCS1GuardPreference;
             nl_cs1_diag.faultAddress = address; return;
         }
-        if (!mapping_valid()) {
+        /* Persistence and mapping queries can consume the remaining budget.
+         * Recheck immediately before posting; a failed marker clear remains
+         * conservatively pending and is reported by EndClient. */
+        if (!mapping_valid() || nl_cs1_expired(started, budget)) {
+            if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
             /* We know this doorbell was never posted. */
             pending_set(0, 0);
             return;
         }
         posted = 1;
     }
+    access_address = address;
     *(volatile UInt16 *)address = value;
 }
 
@@ -224,7 +279,7 @@ static Boolean synchronize(void)
     return !invalid;
 }
 
-UInt16 nl_cs1_probe(UInt16 *hostP, UInt16 *busyP)
+static UInt16 probe_inner(UInt16 *hostP, UInt16 *busyP)
 {
     UInt16 status;
     *hostP = *busyP = 0;
@@ -237,10 +292,10 @@ UInt16 nl_cs1_probe(UInt16 *hostP, UInt16 *busyP)
     return invalid ? FN_ERR_NOT_FOUND : FN_OK;
 }
 
-UInt16 nl_cs1_begin(void)
+static UInt16 begin_inner(void)
 {
     UInt16 host, busy, result;
-    result = nl_cs1_probe(&host, &busy);
+    result = probe_inner(&host, &busy);
     if (result) return result;
     if (FN_PALMOS_RD(SBN_R_STATUS) & SBN_ST_LOOPBACK) return FN_ERR_NOT_READY;
     if (!synchronize()) return FN_ERR_BUSY;
@@ -318,7 +373,7 @@ Boolean nl_cs1_reply_valid(const UInt8 *request, const UInt8 *response,
 /* A valid final reply may outlive a failed completion snapshot. EndClient
  * can retire that exact completed sequence without transmitting anything.
  * Unknown command outcomes remain in nl_uncertain_operation. */
-void nl_cs1_retire(void)
+static void retire_inner(void)
 {
     Pending p;
     if (!pending_get(&p) || !p.sequence || !mapping_valid() ||
@@ -326,17 +381,11 @@ void nl_cs1_retire(void)
     pending_set(0, 0);
 }
 
-uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
+static uint16_t exchange_inner(const uint8_t *request, uint16_t length,
                             uint8_t *response, uint16_t capacity, uint16_t *got)
 {
     UInt16 result;
     posted = ambiguous = 0;
-    MemSet(&nl_cs1_diag, sizeof(nl_cs1_diag), 0);
-    nl_cs1_diag.size = sizeof(nl_cs1_diag);
-    nl_cs1_diag.version = nioCS1DiagnosticVersion;
-    nl_cs1_diag.device = request[0]; nl_cs1_diag.command = request[1];
-    nl_cs1_diag.ticksStarted = TimGetTicks();
-    nl_cs1_diag.phase = nioCS1PhaseSync;
     *got = 0;
     if (!synchronize() || nl_cs1_expired(started, budget)) {
         last_result = FN_PALMOS_NO_ANSWER;
@@ -355,5 +404,125 @@ uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
     /* Completion may race the local deadline. Discard a finalized old reply,
      * never accept it as a new request's answer. Unresolved markers persist. */
     if (!invalid && settled(_fn_palmos_seq, NULL)) pending_set(0, 0);
+    return result;
+}
+
+/* SDK HsCardErrTry/Catch is intended for shared-library module accesses.
+ * One 56-byte exception object + list pointer and volatile result live only
+ * on this C stack. No return/goto may leave the installed scope. The operation
+ * bodies own no resources requiring C unwinding; their callers still execute
+ * the normal typed-service nl_leave path after this function returns.
+ * No nested guard or interrupt masking is required. Mapping/deadline checks
+ * remain per word; a catcher is not permission to cache a dynamic mapping. */
+static UInt16 card_run(volatile UInt16 operation, void *context)
+{
+    volatile UInt16 result = FN_ERR_IO;
+    ErrExceptionType frame;
+    void ** volatile list;
+    UInt16 *availability = (UInt16 *)context;
+    CardExchange *exchange = (CardExchange *)context;
+    if (!supported()) {
+        invalid = 1;
+        nl_cs1_diag.guard = nioCS1GuardMapping;
+        nl_cs1_diag.guardDetail = 2;
+        return operation == cardExchange ? FN_PALMOS_BAD_READ : FN_ERR_NOT_FOUND;
+    }
+    access_address = 0;
+    /* Exact SDK HsCardErrTry/Catch chain + ErrSetJump sequence, using the
+     * selected Palm SDK's own exception type and trap declarations. */
+    list = nl_hs_catch_list();
+    frame.err = 0;
+    frame.nextP = (ErrExceptionPtr)*list;
+    *list = &frame;
+    if (ErrSetJump(frame.state) == 0) {
+        switch (operation) {
+        case cardInit:
+            result = fn_palmos_open() ? FN_OK : FN_ERR_NOT_FOUND;
+            break;
+        case cardProbe:
+            result = probe_inner(availability, availability + 1);
+            break;
+        case cardBegin:
+            result = begin_inner();
+            break;
+        case cardExchange:
+            result = exchange_inner(exchange->request, exchange->length,
+                exchange->response, exchange->capacity, exchange->got);
+            break;
+        case cardRetire:
+            retire_inner(); result = FN_OK;
+            break;
+        }
+        *list = frame.nextP;
+    } else {
+        *list = frame.nextP;
+        invalid = 1;
+        nl_cs1_diag.guard = nioCS1GuardCardFault;
+        /* Read the SDK-owned error field from memory after longjmp. */
+        nl_cs1_diag.guardDetail = (UInt16)*(volatile UInt32 *)&frame.err;
+        nl_cs1_diag.reason = nioCS1ReasonLocal;
+        nl_cs1_diag.faultAddress = access_address;
+        /* posted is set BEFORE attempting a doorbell write. A fault cannot
+         * establish whether the module observed it; retain its marker. */
+        ambiguous = posted;
+        result = FN_ERR_IO;
+    }
+    /* All exception-chain cleanup has now finished, including on faults. */
+    if (nl_cs1_diag.guard == nioCS1GuardCardFault) {
+        last_result = FN_PALMOS_BAD_READ;
+        diagnostic_save(last_result);
+        if (operation == cardExchange) result = FN_PALMOS_BAD_READ;
+    }
+    access_address = 0;
+    return result;
+}
+
+UInt16 nl_cs1_open(void)
+{
+    UInt16 result;
+    diagnostic_start(NULL);
+    result = card_run(cardInit, NULL);
+    /* Discovery sets CS1 before reading MAGIC. A failed discovery must not
+     * leave that provisional mapping cached when no backend became active. */
+    if (result) fn_palmos_close();
+    return result;
+}
+
+UInt16 nl_cs1_probe(UInt16 *hostP, UInt16 *busyP)
+{
+    UInt16 availability[2], result;
+    diagnostic_start(NULL);
+    availability[0] = availability[1] = 0;
+    result = card_run(cardProbe, availability);
+    *hostP = result ? 0 : availability[0];
+    *busyP = result ? 0 : availability[1];
+    if (result && !nl_active()) fn_palmos_close();
+    return result;
+}
+
+UInt16 nl_cs1_begin(void)
+{
+    diagnostic_start(NULL);
+    return card_run(cardBegin, NULL);
+}
+
+void nl_cs1_retire(void)
+{
+    /* Keep the preceding exchange's phase/details unless a new fault occurs.
+     * The first saved diagnostic remains unchanged by subsequent cleanup. */
+    card_run(cardRetire, NULL);
+}
+
+uint16_t fn_palmos_exchange(const uint8_t *request, uint16_t length,
+                            uint8_t *response, uint16_t capacity, uint16_t *got)
+{
+    CardExchange exchange;
+    UInt16 result;
+    diagnostic_start(request);
+    exchange.request = request; exchange.length = length;
+    exchange.response = response; exchange.capacity = capacity; exchange.got = got;
+    *got = 0;
+    result = card_run(cardExchange, &exchange);
+    if (result != SBN_RES_OK) *got = 0;
     return result;
 }

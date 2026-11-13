@@ -1,5 +1,6 @@
 #include "NioLibClient.h"
 #include "NioLibCS1Diagnostic.h"
+#include "benchmark.h"
 
 Err NioTestGuardedGlobals(UInt16 refNum, UInt32 delta,
                          NioLibGlobalsResult *resultP, UInt16 *registersOK);
@@ -298,6 +299,27 @@ static void line(const Char *text, Coord y)
     WinDrawChars(text, StrLen(text), 4, y);
 }
 
+/* Optional third page: match both sequence and start tick so an old samples
+ * preference cannot be presented as evidence for a different failure. */
+static void show_cs1_samples(const NioLibCS1Diagnostic *d)
+{
+    NioLibCS1Samples s;
+    UInt16 size = sizeof(s);
+    Char a[80], b[80], c[80];
+    if (d->reason != nioCS1ReasonSnapshot ||
+        PrefGetAppPreferences(nioLibCreator, nioCS1SamplesPref, &s, &size, false) != nioCS1SamplesVersion ||
+        size != sizeof(s) || s.size != sizeof(s) || s.version != nioCS1SamplesVersion ||
+        s.count != 4 || s.ticksStarted != d->ticksStarted ||
+        s.expectedSequence != d->expectedSequence) return;
+    StrPrintF(a, "RESULT %04X/%04X\n       %04X/%04X", s.snapshot[0].result,
+        s.snapshot[1].result, s.snapshot[2].result, s.snapshot[3].result);
+    StrPrintF(b, "Reject %02X/%02X/%02X/%02X", s.snapshot[0].flags,
+        s.snapshot[1].flags, s.snapshot[2].flags, s.snapshot[3].flags);
+    StrPrintF(c, "ACK %u/%u/%u/%u\nWanted %u", s.snapshot[0].ack,
+        s.snapshot[1].ack, s.snapshot[2].ack, s.snapshot[3].ack, s.expectedSequence);
+    FrmCustomAlert(1009, a, b, c);
+}
+
 /* Read only the last failure record: do not open a client, probe the module,
  * reset recovery state or overwrite the evidence while displaying it. */
 static void show_cs1_diagnostic(void)
@@ -325,6 +347,41 @@ static void show_cs1_diagnostic(void)
         d.statusFirst, d.statusLast, d.wireLength, d.packetReason);
     StrPrintF(c, "Word check want %04X\nComputed %04X", d.expectedCheck, d.computedCheck);
     FrmCustomAlert(1009, a, b, c);
+    show_cs1_samples(&d);
+}
+
+/* The editable URI is owned by the form's field handle. Results never erase
+ * that field or the controls below it. No per-chunk drawing enters timing. */
+static FieldType *benchmark_field(void)
+{
+    FormType *form = FrmGetActiveForm();
+    return (FieldType *)FrmGetObjectPtr(form, FrmGetObjectIndex(form, 1021));
+}
+
+static void draw_benchmark(void)
+{
+    Char text[48];
+    RectangleType area = {{2, 61}, {156, 72}};
+    const Char *status = nio_benchmark.bytes == 65536UL ?
+        "PASS - all bytes verified" : "64 KiB fixture; 256-byte reads";
+    if (nio_benchmark.errors) {
+        switch (nio_benchmark_failure) {
+        case nioBenchmarkInit: status = "FAIL: NIO initialization"; break;
+        case nioBenchmarkRead: status = "FAIL: FileRead API error"; break;
+        case nioBenchmarkShort: status = "FAIL: short fixture read"; break;
+        case nioBenchmarkPattern: status = "FAIL: fixture byte mismatch"; break;
+        default: status = "FAIL: unknown test stage"; break;
+        }
+    } else if (nio_benchmark.cleanupResult || nio_benchmark.cleanupPalm)
+        status = "FAIL: cleanup";
+    WinEraseRectangle(&area, 0);
+    line(status, 62);
+    StrPrintF(text, "%lu bytes / %lu ticks", nio_benchmark.bytes, nio_benchmark.ticks); line(text, 74);
+    StrPrintF(text, "%lu B/s  Sum %08lX", nio_benchmark.rate, nio_benchmark.checksum); line(text, 86);
+    StrPrintF(text, "Calls %u Errors %u FN %u/%04X", nio_benchmark.calls,
+        nio_benchmark.errors, nio_benchmark.result, nio_benchmark.palm); line(text, 98);
+    StrPrintF(text, "Start %lu I%lu E%lu", nio_benchmark_started, nio_benchmark.initTicks, nio_benchmark.cleanupTicks); line(text, 110);
+    StrPrintF(text, "Cleanup FN %u Palm %04X", nio_benchmark.cleanupResult, nio_benchmark.cleanupPalm); line(text, 122);
 }
 
 static void draw_results(void)
@@ -332,6 +389,7 @@ static void draw_results(void)
     Char text[48];
     UInt16 form = FrmGetActiveFormID();
     RectangleType area = {{2, 17}, {156, 119}};
+    if (form == 1020) { draw_benchmark(); return; }
     /* Form controls are already drawn. Clear only the results above them;
      * the network log and transport controls lie inside the old full area. */
     if (form == 1002) area.extent.y = 101;
@@ -349,7 +407,7 @@ static void draw_results(void)
         return;
     }
     if (form == 1002) {
-        line(net_failed ? "FAIL - networking" : "NIO library ABI 1.2", 20);
+        line(net_failed ? "FAIL - networking" : "NIO library ABI 1.6", 20);
         line(net_stage, 35);
         StrPrintF(text, "FN %02X  Palm %04X", net_result, net_palm); line(text, 50);
         StrPrintF(text, "Module %u  Host %u", net_module, net_host); line(text, 65);
@@ -377,12 +435,27 @@ static Boolean handle(EventType *e)
         FrmDrawForm(FrmGetActiveForm());
         if (FrmGetActiveFormID() == 1000) run_tests();
         if (FrmGetActiveFormID() == 1010) config_read();
+        if (FrmGetActiveFormID() == 1020) {
+            FldInsert(benchmark_field(), "tnfs+tcp://tnfs.fujinet.online/PALM/nio-throughput.bin",
+                      sizeof("tnfs+tcp://tnfs.fujinet.online/PALM/nio-throughput.bin") - 1);
+            FrmSetFocus(FrmGetActiveForm(), FrmGetObjectIndex(FrmGetActiveForm(), 1021));
+        }
         draw_results(); return true;
     }
     if (e->eType == ctlSelectEvent && e->data.ctlSelect.controlID == 1001) {
         run_tests(); draw_results(); return true;
     }
     if (e->eType == ctlSelectEvent) {
+        if (e->data.ctlSelect.controlID == 1018) { FrmGotoForm(1020); return true; }
+        if (e->data.ctlSelect.controlID == 1023) { FrmGotoForm(1002); return true; }
+        if (e->data.ctlSelect.controlID == 1022) {
+            const Char *uri = FldGetTextPtr(benchmark_field());
+            if (uri && *uri) {
+                line("Reading; please wait...", 62);
+                NioTestBenchmark(uri); draw_results();
+            }
+            return true;
+        }
         if (e->data.ctlSelect.controlID == 1008) { show_cs1_diagnostic(); return true; }
         if (e->data.ctlSelect.controlID == 1011) { config_close(); FrmGotoForm(1000); return true; }
         if (e->data.ctlSelect.controlID == 1007) { fn_shutdown(); FrmGotoForm(1010); return true; }

@@ -10,6 +10,7 @@ import test_palmos_shared as foundation
 
 try:
     from unicorn import UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
+    from unicorn import m68k_const
     from unicorn.m68k_const import UC_M68K_REG_A0, UC_M68K_REG_A7, UC_M68K_REG_D0, UC_M68K_REG_PC
 except ImportError:
     pass
@@ -34,6 +35,11 @@ def reply(device, command, payload=b'', status=0):
 
 class NetworkMachine(foundation.PalmMachine):
     CS1 = 0x29000000
+    CARD_EXCEPTION_LIST = 0x7f000
+    # SDK ErrJumpBuf documents these twelve saved longs. The stub models
+    # their public ABI, not Palm ROM's removal ISR or bus-exception frame.
+    JUMP_REGISTERS = ('D3', 'D4', 'D5', 'D6', 'D7', 'PC',
+                      'A2', 'A3', 'A4', 'A5', 'A6', 'A7')
 
     def __init__(self):
         self.preferences, self.features = {}, {}
@@ -109,6 +115,16 @@ class NetworkMachine(foundation.PalmMachine):
                     self.read16(sp + 6), bytes(uc.mem_read(self.read32(sp + 8), self.read16(sp + 12))))
         elif trap == 0xa0f7: result = self.now
         elif trap == 0xa2e9: result = 100
+        elif trap == 0xa085:  # ErrSetJump: return 0; save trap-return context
+            jump = []
+            for name in self.JUMP_REGISTERS:
+                value = pc + 4 if name == 'PC' else uc.reg_read(
+                    getattr(m68k_const, 'UC_M68K_REG_' + name))
+                jump.append(value)
+            uc.mem_write(self.read32(sp), struct.pack('>12I', *jump))
+        elif trap == 0xa349 and self.read16(sp) == 9:
+            assert self.handspring, 'card exception selector without support'
+            uc.reg_write(UC_M68K_REG_A0, self.CARD_EXCEPTION_LIST)
         elif trap == 0xa349:
             self.hs_calls += 1
             assert self.handspring, 'Handspring selector used without feature support'

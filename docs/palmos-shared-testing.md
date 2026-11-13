@@ -10,7 +10,12 @@ remote opens, genuine request rejection, inconsistent completion bounds,
 separate deadline/mapping/removal/length/checksum failures, clean settled query
 cleanup while retaining pending replies and earlier mutating uncertainty, and
 reading the diagnostic dialogs without transport activity.
-See [physical CS1 reproduction and record fields](palmos-cs1-diagnostics.md).
+See [physical CS1 reproduction and record fields](palmos-cs1-diagnostics.md)
+and the [FileRead throughput comparison](palmos-springboard-throughput.md).
+Compiled card-exception coverage and physical qualification are described in
+[Springboard card-fault recovery](palmos-springboard-card-recovery.md).
+The shared library retains conservative per-word mapping validation. Burst
+implementations and their qualification matrix are not supported.
 
 ```sh
 python3 -m venv build/palmos-test-venv
@@ -115,18 +120,3 @@ actual resource growth and unchanged globals/ordinals, and executes compiled
 lifecycle/register/network tests. The network tests relocate the resource to
 three addresses, including above 0x80000. See
 [layout and budget evidence](palmos-shared-layout.md).
-
-On 2026-11-11 the user reported three successful TNFS browse/PRC-install cycles
-over Springboard to POSIX NIO with implementation 11, without transfer or cleanup
-errors. This is physical acceptance evidence for that workflow; HTTP, other
-transports and reset/recovery qualification remain separate. Earlier captured
-out-of-range CS1 metadata reads remain documented diagnostic evidence, not a
-proven hardware root cause or proof that intermittent faults cannot recur.
-
-On this development environment,
-BBC/Watcom/Amiga toolchains, the sibling Amiga driver ABI headers and
-`soft65c02_unit` are unavailable, so the full general `make check` cannot be
-reported as passing. Atari/C64 and hosted Linux archives and available native
-wire/link tests provide constrained/non-cc65 coverage; the separate Palm check
-uses `../palmdev-toolchain`. Do not replace missing prerequisites with no-op
-successes when completing upstream validation.

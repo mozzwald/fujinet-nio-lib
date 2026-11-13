@@ -33,6 +33,12 @@ static uint16_t read_result(uint16_t seq)
 {
     uint16_t attempt, first, ack, response, result, last, tail;
     uint16_t length, check, previous = 0xffffu;
+#ifdef FN_PALMOS_SHARED
+    NioLibCS1Snapshot *sample;
+    uint16_t flags;
+    nl_cs1_samples.count = 0;
+    nl_cs1_samples.expectedSequence = seq;
+#endif
     for (attempt = 0; attempt < 4; ++attempt) {
         first = FN_PALMOS_RD(SBN_R_STATUS);
         ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
@@ -54,6 +60,23 @@ static uint16_t read_result(uint16_t seq)
         if (result != SBN_RES_OK) {
             nl_cs1_diag.wireLength = length; nl_cs1_diag.expectedCheck = check;
         }
+        /* Retain the sampled words themselves, without extra bus reads.
+         * Length/check are sampled only for a non-OK raw RESULT, as before. */
+        flags = 0;
+        if ((first | last) & SBN_ST_BUSY) flags |= nioCS1RejectBusy;
+        if (ack != seq) flags |= nioCS1RejectAck;
+        if (response != seq) flags |= nioCS1RejectSequence;
+        if (tail != seq) flags |= nioCS1RejectTail;
+        if (result > SBN_RES_REFUSED) flags |= nioCS1RejectResult;
+        if (length || check) flags |= nioCS1RejectNonemptyError;
+        if (!flags && previous != 0xffffu && previous != result) flags |= nioCS1ChangedResult;
+        if (ACCESS_RESULT()) flags |= nioCS1RejectAccess;
+        sample = &nl_cs1_samples.snapshot[attempt];
+        sample->statusFirst = first; sample->ack = ack;
+        sample->sequence = response; sample->result = result;
+        sample->length = length; sample->check = check;
+        sample->statusLast = last; sample->tail = tail; sample->flags = flags;
+        nl_cs1_samples.count = attempt + 1;
 #endif
         if (ACCESS_RESULT()) return ACCESS_RESULT();
         if (((first | last) & SBN_ST_BUSY) || ack != seq ||
