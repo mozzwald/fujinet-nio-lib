@@ -271,7 +271,7 @@ build:
 :
     lda length
     ora length+1
-    beq success
+    jeq success
     lda accepted
     ora accepted+1
     bne @progress
@@ -307,6 +307,20 @@ build:
     lda total+1
     adc accepted+1
     sta total+1
+    ; Keep the caller's confirmed prefix on every later error path.
+    lda written_ptr
+    sta ptr1
+    lda written_ptr+1
+    sta ptr1+1
+    ora ptr1
+    beq @published
+    ldy #0
+    lda total
+    sta (ptr1),y
+    iny
+    lda total+1
+    sta (ptr1),y
+@published:
     jsr reset_retries
     lda total
     cmp length
@@ -315,19 +329,6 @@ build:
     cmp length+1
     bne next_jump
 success:
-    lda written_ptr
-    sta ptr1
-    lda written_ptr+1
-    sta ptr1+1
-    ora ptr1
-    beq ok
-    ldy #0
-    lda total
-    sta (ptr1),y
-    iny
-    lda total+1
-    sta (ptr1),y
-ok:
     lda #0
     beq done
 next_jump:

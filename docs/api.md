@@ -509,6 +509,18 @@ uint8_t fn_write(fn_handle_t handle,
 requested bytes have been accepted or a non-transient error occurs. This hides
 asynchronous TCP connect completion from applications after `fn_open()`.
 
+If a write stops after partial progress, `written` retains the confirmed
+accepted prefix for this call, including when the result is an error. The local
+sequential write offset advances by that count. Never resend that prefix or roll its offset back.
+After a confirmed non-accepting response (for example, service BUSY exhaustion),
+continue with `offset + written`, `data + written`, and `len - written`.
+
+The count does not resolve the outcome of the final failed exchange. A timeout,
+corrupt reply or other ambiguous transport failure may hide further accepted
+bytes. Abandon/close that connection and recover at the application protocol
+level; do not blindly replay its remainder. Error codes, automatic retry limits,
+and transport uncertainty/recovery policy are unchanged by progress reporting.
+
 **Half-Close:** To signal end of write (send FIN), call with `len=0` at current offset:
 ```c
 // After writing all data, half-close the write side

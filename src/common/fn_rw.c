@@ -146,12 +146,13 @@ uint8_t fn_write(fn_handle_t handle,
 
         session->write_offset += accepted;
         total = (uint16_t)(total + accepted);
+        /* Publish only acknowledged progress, including on a later error.
+         * The final failed exchange may still have an unknown outcome. */
+        if (written != NULL) {
+            *written = total;
+        }
         retries = FN_WRITE_RETRY_LIMIT;
     } while (total < len);
-
-    if (written != NULL) {
-        *written = total;
-    }
 
     return FN_OK;
 }

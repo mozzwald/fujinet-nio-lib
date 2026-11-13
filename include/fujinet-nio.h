@@ -874,12 +874,18 @@ uint8_t fn_tcp_open(fn_handle_t *handle,
  * continues partial writes until the requested byte count has been accepted or
  * a non-transient error occurs. Writes larger than one packet are split into
  * bounded requests; each request includes 15 bytes of protocol overhead.
- * 
+ *
+ * On error, written still reports the confirmed accepted prefix of this call,
+ * and the local sequential offset has advanced by that count. This is not a
+ * guarantee that a failed exchange accepted no additional bytes. Resume only
+ * after confirmed non-acceptance; an uncertain transport/response failure
+ * requires abandoning the connection, rather than replaying the remainder.
+ *
  * @param handle     Session handle
  * @param offset     Byte offset (must be sequential)
  * @param data       Data buffer to write
  * @param len        Length of data
- * @param written    Pointer to receive bytes actually written
+ * @param written    Pointer to confirmed bytes accepted, even on error
  * @return FN_OK on success, error code on failure
  */
 typedef struct {

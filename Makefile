@@ -375,3 +375,9 @@ test: test-bbc-ready
 test-bbc-headers:
 	bash tests/run_bbc_headers_test.sh
 test: test-bbc-headers
+
+# Partial progress must agree between portable C and the assembly writers.
+.PHONY: test-write-progress
+test-write-progress:
+	bash tests/run_write_progress_test.sh
+test: test-write-progress

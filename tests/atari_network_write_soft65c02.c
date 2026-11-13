@@ -83,7 +83,7 @@ void test_func(void) {
     result=profile_network_write(expected_handle,expected_initial,ptr,size,out);
     fn_write_get_last_diagnostics(0); /* optional destination must be safe */
     memset(&d,0xa5,sizeof(d)); fn_write_get_last_diagnostics(&d);
-    if (result!=expected || bad || (out && wrote!=(expected?0:size))) {test_result=1;return;}
+    if (result!=expected || bad || (out && wrote!=(test_case==21?2:(expected?0:size)))) {test_result=1;return;}
     if (test_case>=1 && test_case<=5) {
         if (builder_calls || transport_calls || parse_calls || d.exchanges) {test_result=2;return;}
     } else if (test_case==20) {

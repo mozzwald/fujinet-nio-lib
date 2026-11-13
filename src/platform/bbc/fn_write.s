@@ -1,7 +1,6 @@
         .export _fn_write
 
         .import __fn_initialized, __fn_sessions
-        .import invalid_with_stack_fix
         .import _fn_bbc_rw_setup_write, _fn_bbc_osword78, addysp, return0
         .importzp c_sp, ptr1, ptr2, ptr3, ptr4, tmp1, tmp2, tmp3, tmp4
 
@@ -25,10 +24,22 @@ write_block:
 ;                  uint16_t len,
 ;                  uint16_t *written)
 _fn_write:
+        ; Match the common API even when validation fails before ROM access.
+        sta     ptr3
+        stx     ptr3+1
+        ora     ptr3+1
+        beq     :+
+        lda     #$00
+        tay
+        sta     (ptr3),y
+        iny
+        sta     (ptr3),y
+:
+        lda     ptr3
+        ldx     ptr3+1
         ldy     __fn_initialized
         bne     @check_args
-        ldy     #FN_WRITE_STACK_BYTES
-        jmp     invalid_with_stack_fix
+        jmp     @invalid
 
 @check_args:
         jsr     _fn_bbc_rw_setup_write
@@ -70,15 +81,6 @@ _fn_write:
         cmp     __fn_sessions + FN_SESSION_WRITE_OFFSET + 3,y
         bne     @invalid
 
-        lda     ptr3
-        ora     ptr3+1
-        beq     @get_len
-        ldy     #$00
-        tya
-        sta     (ptr3),y
-        iny
-        sta     (ptr3),y
-
 @get_len:
         ldy     #STACK_LEN
         lda     (c_sp),y
@@ -90,7 +92,7 @@ _fn_write:
         ora     ptr4+1
         bne     :+
         jmp     @success
-: 
+:
 
         ldy     #STACK_DATA_PTR
         lda     (c_sp),y
@@ -148,15 +150,17 @@ _fn_write:
         lda     #<write_block
         ldx     #>write_block
         jsr     _fn_bbc_osword78
+        ; The adapter returns status in A, then clears X (changing Z).
+        cmp     #$00
         beq     @advance
         cmp     #$03
         bne     :+
         jmp     @not_found
-: 
+:
         cmp     #$01
         bne     :+
         jmp     @invalid
-: 
+:
         jsr     fix_stack
         ldx     #$00
         lda     #FN_ERR_IO
@@ -179,21 +183,15 @@ _fn_write:
         adc     write_block + 5
         sta     tmp2
 
-        lda     tmp1
-        cmp     ptr4
-        lda     tmp2
-        sbc     ptr4+1
-        bcs     :+
-        jmp     @loop
-: 
-
+        ; Each successful ROM chunk advances its cursor. Keep local state
+        ; and the caller's confirmed count aligned before the next OSWORD.
         ldy     tmp4
         clc
         lda     __fn_sessions + FN_SESSION_WRITE_OFFSET,y
-        adc     tmp1
+        adc     write_block + 4
         sta     __fn_sessions + FN_SESSION_WRITE_OFFSET,y
         lda     __fn_sessions + FN_SESSION_WRITE_OFFSET + 1,y
-        adc     tmp2
+        adc     write_block + 5
         sta     __fn_sessions + FN_SESSION_WRITE_OFFSET + 1,y
         lda     __fn_sessions + FN_SESSION_WRITE_OFFSET + 2,y
         adc     #$00
@@ -204,13 +202,22 @@ _fn_write:
 
         lda     ptr3
         ora     ptr3+1
-        beq     @success
+        beq     @published
         ldy     #$00
         lda     tmp1
         sta     (ptr3),y
         iny
         lda     tmp2
         sta     (ptr3),y
+
+@published:
+        lda     tmp1
+        cmp     ptr4
+        lda     tmp2
+        sbc     ptr4+1
+        bcs     :+
+        jmp     @loop
+:
 
 @success:
         jsr     fix_stack

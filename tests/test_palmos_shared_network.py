@@ -281,6 +281,36 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(m.close(), (0, 0))
         self.assertEqual(len(m.allocations), len(m.frees))
 
+    def test_write_error_preserves_confirmed_progress_through_client_and_trap(self):
+        class PartialWriteMachine(NetworkMachine):
+            def execute(self, request):
+                response = super().execute(request)
+                if request[:2] != b'\xfd\x03': return response
+                if struct.unpack_from('<I', request, 9)[0] == 0:
+                    handle = struct.unpack_from('<H', request, 7)[0]
+                    return reply(0xfd, 3, struct.pack('<BBHHIH', 1, 0, 0, handle, 0, 2))
+                return reply(0xfd, 3, status=5)
+
+        m = PartialWriteMachine()
+        self.assertEqual(m.client('fn_init'), 0)
+        m.uc.mem_write(0x9100, b'http://example.com/\0')
+        self.assertEqual(m.client('fn_open', struct.pack('>IBxIBx', 0x9200, 0, 0x9100, 0)), 0)
+        handle = m.read16(0x9200)
+        m.uc.mem_write(0x9500, b'ABCD')
+        m.uc.mem_write(0x9600, b'\xff\xff')
+        self.assertEqual(m.client('fn_write', struct.pack('>HIIHI', handle, 0, 0x9500, 4, 0x9600)), 5)
+        self.assertEqual(m.read16(0x9600), 2)
+        writes = [p for p in m.requests if p[:2] == b'\xfd\x03']
+        self.assertEqual([(struct.unpack_from('<I', p, 9)[0], p[15:]) for p in writes],
+                         [(0, b'ABCD'), (2, b'CD')])
+        # An error did not roll the local offset back or permit prefix replay.
+        self.assertEqual(m.client('fn_write', struct.pack('>HIIHI', handle, 0, 0x9500, 4, 0x9600)), 2)
+        self.assertEqual(m.read16(0x9600), 0)
+        self.assertEqual(len([p for p in m.requests if p[:2] == b'\xfd\x03']), 2)
+        m.client('fn_shutdown')
+        self.assertFalse(m.globals)
+        self.assertFalse(m.sessions)
+
     def test_foreground_owner_busy_stale_tokens_and_last_close(self):
         m = NetworkMachine(); m.open(); _, token, _ = m.begin()
         self.assertEqual(m.begin()[0], 0x8006)
