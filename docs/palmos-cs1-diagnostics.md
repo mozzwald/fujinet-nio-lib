@@ -45,7 +45,7 @@ takes precedence over synthetic zero values.
 | Phase | 1 synchronization, 2 request send, 3 response poll, 4 RESULT validation, 5 reply read |
 | Reason | 1 length outside CS1 bound, 2 word checksum, 3 packet validation, 4 unstable/invalid RESULT snapshot, 5 response poll, 6 local guard, 7 bridge error, 8 pre-send synchronization |
 | Guard | 0 none, 1 local deadline, 2 mapping/removal check, 3 pending-marker preference write/readback, 4 caught Handspring card fault |
-| Guard detail (mapping) | 1 missing mapping/card, 2 installed-attribute query failed, 3 module absent, 4 base query failed, 5 size query failed, 6 zero size/overflow, 7 CS1 changed, 8 CS0 changed |
+| Guard detail (mapping) | 1 missing mapping/card, 2 installed-attribute query failed, 3 module absent, 4 base query failed, 5 size query failed, 6 zero size/overflow, 7 CS1 changed, 8 CS0 changed, 9 experimental aperture/address/certificate boundary |
 | Guard detail (card fault) | low 16 bits of the SDK exception error, when supplied; diagnostic only |
 | Packet reason | 0 none, 1 short/truncated, 2 device/command echo, 3 packet length, 4 packet checksum, 5 payload/metadata |
 

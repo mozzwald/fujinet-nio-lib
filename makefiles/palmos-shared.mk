@@ -12,12 +12,23 @@ include makefiles/palmos-sdk.mk
 PALMFLAGS = -Wall -Werror -Os $(PALMOS_SDK_FLAGS) -Iinclude/palmos
 HANDSPRING_INCLUDE ?=
 SBNIO_ABI_INCLUDE ?= -I../fujinet-nio/bridges/rp2350-springboard/include
-# Only the conservative per-word validation path is supported. Reject stale
-# experimental build commands instead of silently accepting a burst setting.
+# Only scalar MMIO helpers are supported. Reject the old burst code settings;
+# payload certificates below change validation frequency, not bus instructions.
 PALMOS_CS1_BURST_WORDS ?= 0
 PALMOS_CS1_BURST_WRITE ?= 0
 ifneq ($(PALMOS_CS1_BURST_WORDS):$(PALMOS_CS1_BURST_WRITE),0:0)
 $(error CS1 bursts are unsupported; PALMOS_CS1_BURST_WORDS and PALMOS_CS1_BURST_WRITE must be 0)
+endif
+PALMOS_CS1_PAYLOAD_WORDS ?= 32
+ifneq ($(words $(PALMOS_CS1_PAYLOAD_WORDS)),1)
+$(error PALMOS_CS1_PAYLOAD_WORDS must be 0, 8, 16, 32 or 64)
+endif
+ifeq ($(filter $(PALMOS_CS1_PAYLOAD_WORDS),0 8 16 32 64),)
+$(error PALMOS_CS1_PAYLOAD_WORDS must be 0, 8, 16, 32 or 64)
+endif
+CS1FLAGS = -DNL_CS1_PAYLOAD_WORDS=$(PALMOS_CS1_PAYLOAD_WORDS)
+ifneq ($(PALMOS_CS1_PAYLOAD_WORDS),0)
+PAYLOADOBJ = $(B)/cs1_payload.o
 endif
 LIBFLAGS = $(PALMFLAGS) -Iinclude $(SBNIO_ABI_INCLUDE) -mown-gp
 CORE = fn_state fn_init fn_shutdown fn_open fn_open_exchange fn_open_translated \
@@ -90,14 +101,16 @@ all: verify
 # Header/flag changes must invalidate objects even when callers override B.
 .PHONY: FORCE
 $(B)/settings: FORCE | $(B)
-	@printf '%s\n' '$(CC) $(LIBFLAGS) $(HANDSPRING_INCLUDE) $(PALMOS_LAYOUT_PAD_BYTES) $(PALMOS_LAYOUT_PAD_POSITION)' > $@.tmp
+	@printf '%s\n' '$(CC) $(LIBFLAGS) $(CS1FLAGS) $(HANDSPRING_INCLUDE) $(PALMOS_LAYOUT_PAD_BYTES) $(PALMOS_LAYOUT_PAD_POSITION)' > $@.tmp
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 $(B)/entry.o $(B)/library.o $(B)/image.o $(B)/owner.o $(B)/services.o $(B)/json.o $(B)/cs1.o $(B)/transport.o $(B)/serial.o $(B)/usb.o $(B)/test.o $(B)/benchmark.o $(B)/registers.o $(B)/client.o $(COREOBJS) $(SERVICECOREOBJS) $(DISKCOREOBJS) $(BACKOBJS) $(SERVICEOBJS) $(CLIENTOBJS) $(CLIENTCOMMONOBJS) $(LEGACYOBJS): $(B)/settings $(wildcard include/palmos/*.h)
 
 $(B):
 	mkdir -p $@
 $(B)/library.o: $(S)/library.c include/palmos/NioLib.h $(S)/image.h $(S)/private.h | $(B)
-	$(CC) $(LIBFLAGS) -c $< -o $@
+	$(CC) $(LIBFLAGS) $(CS1FLAGS) -c $< -o $@
+$(B)/cs1_payload.o: $(S)/cs1_payload.c $(S)/private.h $(B)/settings $(wildcard include/palmos/*.h) | $(B)
+	$(CC) $(LIBFLAGS) $(CS1FLAGS) -c $< -o $@
 $(B)/image.o: $(S)/image.c $(S)/image.h | $(B)
 	$(CC) $(LIBFLAGS) -c $< -o $@
 $(B)/entry.o: $(S)/entry.S | $(B)
@@ -109,7 +122,7 @@ $(B)/services.o: $(S)/services.c $(S)/owner.h $(S)/service.h include/palmos/NioL
 $(B)/json.o: $(S)/json.c $(S)/private.h include/palmos/NioLib.h | $(B)
 	$(CC) $(LIBFLAGS) -c $< -o $@
 $(B)/cs1.o: $(S)/cs1.c include/palmos/NioLib.h $(S)/private.h | $(B)
-	$(CC) $(LIBFLAGS) -DFN_PALMOS_SHARED -c $< -o $@
+	$(CC) $(LIBFLAGS) $(CS1FLAGS) -DFN_PALMOS_SHARED -c $< -o $@
 $(B)/transport.o: $(S)/transport.c $(S)/private.h include/palmos/NioLib.h | $(B)
 	$(CC) $(LIBFLAGS) -c $< -o $@
 $(B)/usb.o: $(S)/usb.c $(S)/private.h include/palmos/NioLib.h | $(B)
@@ -125,18 +138,18 @@ $(B)/core/%.o: src/common/%.c $(wildcard include/*.h) | $(B)
 	$(CC) $(LIBFLAGS) -c $< -o $@
 $(B)/backend/fn_palmos_exchange.o: src/platform/palmos/fn_palmos_exchange.c src/platform/palmos/fn_palmos_internal.h $(S)/private.h | $(B)
 	mkdir -p $(B)/backend
-	$(CC) $(LIBFLAGS) -DFN_PALMOS_SHARED -Dfn_palmos_exchange=nl_original_exchange -c $< -o $@
+	$(CC) $(LIBFLAGS) $(CS1FLAGS) -DFN_PALMOS_SHARED -Dfn_palmos_exchange=nl_original_exchange -c $< -o $@
 $(B)/backend/%.o: src/platform/palmos/%.c src/platform/palmos/fn_palmos_internal.h $(S)/private.h | $(B)
 	mkdir -p $(B)/backend
 	$(CC) $(LIBFLAGS) -DFN_PALMOS_SHARED -c $< -o $@
 # Keep the public entries near the dispatch table and place service codecs
 # between their callers and the lower-level transport/core implementations.
 # The linker and image auditor retain their independent range/size checks.
-$(B)/NioLib: makefiles/palmos-shared.mk $(PADOBJ) $(B)/entry.o $(B)/library.o $(B)/image.o $(SERVICEOBJS) $(B)/services.o $(LEGACYOBJS) $(SERVICECOREOBJS) $(B)/owner.o $(B)/transport.o $(DISKCOREOBJS) $(B)/json.o $(COREOBJS) $(B)/cs1.o $(B)/serial.o $(B)/usb.o $(LATEPAD) $(BACKOBJS)
+$(B)/NioLib: makefiles/palmos-shared.mk $(PADOBJ) $(B)/entry.o $(B)/library.o $(B)/image.o $(SERVICEOBJS) $(B)/services.o $(LEGACYOBJS) $(SERVICECOREOBJS) $(PAYLOADOBJ) $(B)/owner.o $(B)/transport.o $(DISKCOREOBJS) $(B)/json.o $(COREOBJS) $(B)/cs1.o $(B)/serial.o $(B)/usb.o $(LATEPAD) $(BACKOBJS)
 	# prc-tools' documented all-version resource ceiling is 64,720 bytes.
 	# Explicit runtime placement keeps memcpy/64-bit helpers reachable from
 	# both the public service entries and the lower-level transport code.
-	$(CC) $(LIBFLAGS) -nostartfiles -Wl,-T,text_64k,-q,-Map,$@.map -o $@ $(B)/entry.o $(B)/library.o $(B)/image.o $(SERVICEOBJS) $(B)/services.o $(LEGACYOBJS) $(SERVICECOREOBJS) $(EARLYPAD) $(B)/owner.o $(B)/transport.o -lc -lgcc $(DISKCOREOBJS) $(B)/json.o $(COREOBJS) $(B)/cs1.o $(B)/serial.o $(B)/usb.o $(LATEPAD) $(BACKOBJS)
+	$(CC) $(LIBFLAGS) -nostartfiles -Wl,-T,text_64k,-q,-Map,$@.map -o $@ $(B)/entry.o $(B)/library.o $(B)/image.o $(SERVICEOBJS) $(B)/services.o $(LEGACYOBJS) $(SERVICECOREOBJS) $(EARLYPAD) $(PAYLOADOBJ) $(B)/owner.o $(B)/transport.o -lc -lgcc $(DISKCOREOBJS) $(B)/json.o $(COREOBJS) $(B)/cs1.o $(B)/serial.o $(B)/usb.o $(LATEPAD) $(BACKOBJS)
 $(B)/nDat0000.bin: $(B)/NioLib scripts/palmos_shared_image.py
 	$(PYTHON) scripts/palmos_shared_image.py image $(B)
 $(B)/libr0000.bin: $(B)/NioLib

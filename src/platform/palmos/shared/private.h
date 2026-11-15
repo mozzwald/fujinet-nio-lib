@@ -47,6 +47,21 @@ void nl_cs1_profile_map_end(UInt32 tick);
 } while (0)
 
 /* Shared-only hooks: the default static Palm build remains unchanged. */
+#ifndef NL_CS1_PAYLOAD_WORDS
+#define NL_CS1_PAYLOAD_WORDS 32
+#endif
+#if NL_CS1_PAYLOAD_WORDS != 0 && NL_CS1_PAYLOAD_WORDS != 8 && \
+    NL_CS1_PAYLOAD_WORDS != 16 && NL_CS1_PAYLOAD_WORDS != 32 && NL_CS1_PAYLOAD_WORDS != 64
+#error Unsupported Springboard payload checkpoint interval
+#endif
+#if NL_CS1_PAYLOAD_WORDS
+extern UInt32 nl_payload_base, nl_payload_next, nl_payload_limit;
+extern UInt16 nl_payload_left;
+extern Boolean nl_payload_active;
+Boolean nl_cs1_payload_begin(UInt16 bytes);
+Boolean nl_cs1_payload_end(void);
+void nl_cs1_payload_cancel(void);
+#endif
 UInt16 nl_bus_read(UInt32 address);
 void nl_bus_write(UInt32 address, UInt16 value);
 Err nl_card_attr(UInt16 card, UInt16 attr, void *value);

@@ -16,6 +16,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(os.environ.get('PALMOS_SHARED_BUILD', ROOT / 'build/palmos-shared-3.1'))
+_settings = (OUT / 'settings').read_text() if (OUT / 'settings').exists() else ''
+_payload_setting = re.search(r'-DNL_CS1_PAYLOAD_WORDS=(\d+)', _settings)
+CS1_PAYLOAD_WORDS = int(_payload_setting[1]) if _payload_setting else 0
+
+
+def payload_maps(words):
+    """Independent expected full validations: initial, quota boundaries, final."""
+    if not CS1_PAYLOAD_WORDS:
+        return words
+    return max(1, (words + CS1_PAYLOAD_WORDS - 1) // CS1_PAYLOAD_WORDS) + 1
 spec = importlib.util.spec_from_file_location('image', ROOT / 'scripts/palmos_shared_image.py')
 image = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(image)
@@ -336,7 +346,8 @@ class CompiledM68KTests(unittest.TestCase):
         if 'nl_usb_open' in m.symbols: version = (8, 1, 3, 6)
         if 'NioLibNetJsonQuery' in m.symbols: version = (8, 1, 4, 7)
         if 'NioLibResetTransport' in m.symbols: version = (8, 1, 5, 8)
-        if 'NioLibRawCall' in m.symbols: version = (8, 1, 6, 16)
+        if 'NioLibRawCall' in m.symbols:
+            version = (8, 1, 6, 17 if CS1_PAYLOAD_WORDS else 16)
         self.assertEqual(struct.unpack('>4H', m.uc.mem_read(0x8000, 8)), version)
         self.assertEqual(m.globals, 0)
         self.assertFalse(m.allocations)

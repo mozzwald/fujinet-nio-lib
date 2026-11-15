@@ -14,7 +14,11 @@
 
 #ifdef FN_PALMOS_SHARED
 #define ACCESS_RESULT() nl_cs1_guard_result()
+#if NL_CS1_PAYLOAD_WORDS
+#define PHASE(p) do { nl_cs1_payload_cancel(); nl_cs1_diag.phase = (p); nl_cs1_profile_phase(p); } while (0)
+#else
 #define PHASE(p) do { nl_cs1_diag.phase = (p); nl_cs1_profile_phase(p); } while (0)
+#endif
 #define POLL_RESPONSE() ((void)(nl_cs1_timing_active && ++nl_cs1_timing.pollChecks), FN_PALMOS_RD(SBN_R_RESP_SEQ))
 #else
 #define ACCESS_RESULT() 0
@@ -137,6 +141,9 @@ static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len,
 #endif
     if (ACCESS_RESULT()) return 0;
     if (n > SBN_RESP_MAX) return 0;
+#if defined(FN_PALMOS_SHARED) && NL_CS1_PAYLOAD_WORDS
+    if (!nl_cs1_payload_begin(n)) return 0;
+#endif
     keep = n < cap ? n : cap;
     pairs = keep >> 1;
     words = ((n + 1) >> 1) - pairs;
@@ -162,6 +169,9 @@ static uint8_t read_reply(uint8_t *resp, uint16_t cap, uint16_t *resp_len,
 #ifdef FN_PALMOS_SHARED
     nl_cs1_diag.computedCheck = check;
     nl_cs1_diag.reason = nioCS1ReasonWordCheck;
+#endif
+#if defined(FN_PALMOS_SHARED) && NL_CS1_PAYLOAD_WORDS
+    if (!nl_cs1_payload_end()) return 0;
 #endif
     if (ACCESS_RESULT()) return 0;
     return check == want;
@@ -205,6 +215,9 @@ uint16_t fn_palmos_exchange(const uint8_t *req, uint16_t len, uint8_t *resp, uin
     PHASE(nioCS1PhaseReply);
     for (tries = 0; tries <= READ_RETRIES; tries++) {
 #ifdef FN_PALMOS_SHARED
+#if NL_CS1_PAYLOAD_WORDS
+        nl_cs1_payload_cancel();
+#endif
         nl_cs1_diag.replyAttempt = tries + 1;
         if (nl_cs1_timing_active) ++nl_cs1_timing.replyAttempts;
 #endif

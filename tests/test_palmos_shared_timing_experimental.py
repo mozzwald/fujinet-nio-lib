@@ -108,8 +108,9 @@ class ExperimentalTimingTests(unittest.TestCase):
             report[str(transport)]['cs1_profile'] = decode(m.preferences[0x4e694c31, 0x4e3a][1])
             profile = report[str(transport)]['cs1_profile']
             self.assertEqual(profile['features'][0], 128)
-            self.assertEqual(profile['attributes'][0], 129024)
-            self.assertEqual(sum(p['map_calls'] for p in profile['phases']), 43008)
+            maps = 43008 - 128 * 265 + 128 * f.payload_maps(265)
+            self.assertEqual(profile['attributes'][0], 3 * maps)
+            self.assertEqual(sum(p['map_calls'] for p in profile['phases']), maps)
             self.assertEqual(sum(p['reads'] for p in profile['phases']), 37888)
             self.assertEqual(sum(p['writes'] for p in profile['phases']), 4864)
             report[str(transport)]['uri'] = 'tnfs+tcp://tnfs.fujinet.online/PALM/nio-throughput.bin'

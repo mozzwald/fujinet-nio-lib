@@ -14,8 +14,10 @@ See [physical CS1 reproduction and record fields](palmos-cs1-diagnostics.md)
 and the [FileRead throughput comparison](palmos-springboard-throughput.md).
 Compiled card-exception coverage and physical qualification are described in
 [Springboard card-fault recovery](palmos-springboard-card-recovery.md).
-The shared library retains conservative per-word mapping validation. Burst
-implementations and their qualification matrix are not supported.
+The selectable Design A baseline retains conservative per-word mapping
+validation. Experimental [Design B payload certificates](palmos-springboard-payload-certificates.md)
+defer only bounded reply-data validations; control reads and writes retain full
+per-word checks. Old burst implementations remain unsupported.
 
 ```sh
 python3 -m venv build/palmos-test-venv

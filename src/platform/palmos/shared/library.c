@@ -118,6 +118,9 @@ static Err globals_close(UInt16 refNum, UInt16 *remainingP)
     if (!nl_opens) return nioLibErrNotOpen;
     if (nl_opens == 1) {
         if (!nl_client_idle()) return nioLibErrBusy;
+#if NL_CS1_PAYLOAD_WORDS
+        if (nl_payload_active) nl_cs1_payload_cancel();
+#endif
         err = nl_can_close();
         --nl_opens;
         /* This is a library-owned residency hold, not an orphaned app Open.
@@ -136,7 +139,11 @@ Err NioLibGetVersion(UInt16 refNum, NioLibVersion *v)
     (void)refNum;
     if (!v || v->size != sizeof(*v)) return nioLibErrParam;
     v->abiMajor = nioLibAbiMajor; v->abiMinor = nioLibAbiMinor;
-    v->implementation = 16; /* Experimental operation-scoped hsEx cache. */
+#if NL_CS1_PAYLOAD_WORDS
+    v->implementation = 17; /* Experimental bounded payload-read certificates. */
+#else
+    v->implementation = 16; /* Design A operation-scoped hsEx cache. */
+#endif
     return errNone;
 }
 

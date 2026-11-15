@@ -98,8 +98,9 @@ class MappingCostTests(unittest.TestCase):
         m.capture = False
         self.assertEqual(m.read16(0x9700), 0)
         self.assertEqual(bytes(m.uc.mem_read(0xb000, 256)), bytes(range(256)))
-        # Cache only support; retain every dynamic query and exact bus trace.
-        maps = 187
+        # The 273-byte reply has 137 payload words. Control/write mappings and
+        # the complete bus trace remain conservative for every build setting.
+        maps = 187 - 137 + f.payload_maps(137)
         self.assertEqual(m.accesses, {'read': 168, 'write': 17})
         self.assertEqual(m.attributes, {1: maps, 3: maps, 4: maps})
         self.assertEqual(m.calls[0xa27b], 1)

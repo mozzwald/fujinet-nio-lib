@@ -1,5 +1,9 @@
 # Conservative Springboard throughput and benchmark
 
+The selectable Design A baseline below uses `PALMOS_CS1_PAYLOAD_WORDS=0`.
+The default experimental implementation 17 uses bounded payload certificates;
+see [Design B selection and safety limits](palmos-springboard-payload-certificates.md).
+
 Experimental ABI 1.6 implementation 16 checks Handspring extension availability
 once per protected card operation. A one-byte A4-owned positive-support flag is
 set only inside the installed card-exception scope and cleared on both normal
@@ -11,7 +15,7 @@ Every word access still queries installation, base and size. Discovery retains
 its checked adapter, provisional CS1 mapping and candidate-card handling. No
 dynamic mapping is cached. The existing per-word deadlines, exception handling,
 pending-marker persistence, sequence checks and reply validation are unchanged.
-This is Design A only; no payload checkpoints or burst access are implemented.
+This describes Design A; Design B changes only explicitly certified payload reads.
 
 Deadline checks run both before and after mapping queries. After persisting
 the pending marker, the doorbell path checks mapping and time again immediately

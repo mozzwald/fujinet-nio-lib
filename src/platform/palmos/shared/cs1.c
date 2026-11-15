@@ -28,6 +28,13 @@ static UInt16 candidate_card, invalid, posted, ambiguous, last_result;
  * operation. This one-byte A4 flag never caches presence/base/size or survives
  * an operation exit; a later entry probes hsEx again, including after faults. */
 static Boolean support_in_operation;
+#if NL_CS1_PAYLOAD_WORDS
+/* A4-owned scalars only: no caller pointer, buffer or persistent recovery
+ * state. Authority is restricted to consecutive words of ONE held reply.
+ * Dynamic remapping between checkpoints need not fault; this experiment
+ * requires a runtime without concurrent chip-select reconfiguration. */
+static UInt32 mapping_size;
+#endif
 static UInt32 started, budget;
 NioLibCS1Diagnostic nl_cs1_diag;
 NioLibCS1Samples nl_cs1_samples;
@@ -112,8 +119,8 @@ static Boolean supported(void)
     return err == errNone && version != 0;
 }
 
-/* The caller has just checked the extensions feature. Keep discovery's
- * candidate-card update here; never cache installation/base/size values. */
+/* The caller has checked system support. Keep discovery's candidate-card
+ * update here, including before its provisional CS1 MAGIC/VERSION reads. */
 static Err card_attr_supported(UInt16 card, UInt16 attr, void *value)
 {
     Err err;
@@ -139,8 +146,8 @@ static Boolean mapping_valid_inner(void)
     UInt16 card = _fn_palmos_card ? _fn_palmos_card : candidate_card;
     UInt16 detail = 0;
     if (!_fn_palmos_cs1 || !card) detail = 1;
-    /* The protected operation already established system-wide HsExt support.
-     * All three dynamic attributes remain queried before every word access. */
+    /* Always query the entire dynamic tuple at a full validation. Only the
+     * explicitly scoped reply-data certificate below may defer such a query. */
     else if (!supported()) detail = 2;
     else if (card_attr_supported(card, 1, &installed)) detail = 2;
     else if (!installed) detail = 3;
@@ -149,7 +156,18 @@ static Boolean mapping_valid_inner(void)
     else if (!size || base + size < base) detail = 6;
     else if (base + size != _fn_palmos_cs1) detail = 7;
     else if (_fn_palmos_cs0 && base != _fn_palmos_cs0) detail = 8;
+#if NL_CS1_PAYLOAD_WORDS
+    /* The ABI's write registers use high address bits: a legal SDK mapping
+     * can still be too small for DOORBELL. Validate BOTH chip-select windows
+     * without overflow, including discovery before any peripheral access. */
+    else if ((base & 1) || (size & 1) ||
+        size < SBN_W(SBN_W_DOORBELL) + 2 ||
+        _fn_palmos_cs1 + size < _fn_palmos_cs1) detail = 9;
+#endif
     if (detail) {
+#if NL_CS1_PAYLOAD_WORDS
+        nl_cs1_payload_cancel();
+#endif
         invalid = 1;
         if (!nl_cs1_diag.guard) {
             nl_cs1_diag.guard = nioCS1GuardMapping;
@@ -157,6 +175,9 @@ static Boolean mapping_valid_inner(void)
         }
         return false;
     }
+#if NL_CS1_PAYLOAD_WORDS
+    mapping_size = size;
+#endif
     return true;
 }
 
@@ -183,8 +204,16 @@ int nl_expired(UInt32 start, UInt32 wait)
  * The latter share nl_expired's predicate but retain their own I/O policy. */
 int nl_cs1_expired(UInt32 start, UInt32 wait)
 {
-    if (invalid) return true;
+    if (invalid) {
+#if NL_CS1_PAYLOAD_WORDS
+        nl_cs1_payload_cancel();
+#endif
+        return true;
+    }
     if (nl_expired(start, wait)) {
+#if NL_CS1_PAYLOAD_WORDS
+        nl_cs1_payload_cancel();
+#endif
         invalid = 1;
         if (!nl_cs1_diag.guard) nl_cs1_diag.guard = nioCS1GuardDeadline;
         return true;
@@ -218,6 +247,9 @@ UInt16 nl_cs1_pending(void)
 }
 Err nl_cs1_reset(void)
 {
+#if NL_CS1_PAYLOAD_WORDS
+    nl_cs1_payload_cancel();
+#endif
     if (!pending_set(0, 0)) return nioLibErrGlobals;
     posted = ambiguous = 0;
     return errNone;
@@ -241,12 +273,95 @@ static Boolean word_access_valid(void)
     return valid;
 }
 
+#if NL_CS1_PAYLOAD_WORDS
+static Boolean payload_reject(void)
+{
+    nl_cs1_payload_cancel();
+    invalid = 1;
+    if (!nl_cs1_diag.guard) {
+        nl_cs1_diag.guard = nioCS1GuardMapping;
+        nl_cs1_diag.guardDetail = 9; /* aperture/address/certificate boundary */
+    }
+    return false;
+}
+
+/* Called only after a full validation, or inside the certified reply span.
+ * Subtraction avoids wrapping the end of the second chip-select window. */
+static Boolean address_valid(UInt32 address)
+{
+    if ((address & 1) || address < _fn_palmos_cs1 ||
+        mapping_size < 2 || address - _fn_palmos_cs1 > mapping_size - 2)
+        return payload_reject();
+    return true;
+}
+
+Boolean nl_cs1_payload_begin(UInt16 bytes)
+{
+    UInt32 span = ((UInt32)bytes + 1) & ~1UL;
+    nl_cs1_payload_cancel();
+    if (!support_in_operation || nl_cs1_diag.phase != nioCS1PhaseReply ||
+        bytes > SBN_RESP_MAX) return payload_reject();
+    if (!word_access_valid()) return false;
+    if (SBN_R_RESP > mapping_size || span > mapping_size - SBN_R_RESP)
+        return payload_reject();
+    nl_payload_base = _fn_palmos_cs1;
+    nl_payload_next = nl_payload_base + SBN_R_RESP;
+    nl_payload_limit = nl_payload_next + span;
+    nl_payload_left = NL_CS1_PAYLOAD_WORDS;
+    nl_payload_active = true;
+    return true;
+}
+
+Boolean nl_cs1_payload_end(void)
+{
+    Boolean complete = nl_payload_active && nl_payload_next == nl_payload_limit;
+    nl_cs1_payload_cancel();
+    if (invalid) return false;
+    if (!complete) return payload_reject();
+    /* Validate even an empty reply and even when its word checksum will fail.
+     * A persistent silent remap must reject the data before packet acceptance. */
+    return word_access_valid();
+}
+
+static Boolean payload_access_valid(UInt32 address)
+{
+    if (!support_in_operation || nl_cs1_diag.phase != nioCS1PhaseReply ||
+        _fn_palmos_cs1 != nl_payload_base || address != nl_payload_next ||
+        address >= nl_payload_limit || !address_valid(address))
+        return payload_reject();
+    if (!nl_payload_left) {
+        if (!word_access_valid()) return false;
+        nl_payload_left = NL_CS1_PAYLOAD_WORDS;
+    } else {
+        /* Preserve both per-word deadline/sticky-invalid observations. There
+         * is no new timer between the final guard and the volatile MOVE.W. */
+        if (nl_cs1_expired(started, budget) || nl_cs1_expired(started, budget))
+            return false;
+    }
+    nl_payload_next += 2;
+    --nl_payload_left;
+    return true;
+}
+#endif
+
 UInt16 nl_bus_read(UInt32 address)
 {
     UInt16 value;
     UInt32 tick = 0;
     Boolean sampled;
+#if NL_CS1_PAYLOAD_WORDS
+    Boolean valid;
+    if (nl_payload_active && address >= nl_payload_base + SBN_R_RESP)
+        valid = payload_access_valid(address);
+    else {
+        /* Metadata/control reads never consume certified permission. */
+        nl_cs1_payload_cancel();
+        valid = word_access_valid() && address_valid(address);
+    }
+    if (!valid) {
+#else
     if (!word_access_valid()) {
+#endif
         if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
         return 0;
     }
@@ -261,7 +376,13 @@ void nl_bus_write(UInt32 address, UInt16 value)
 {
     UInt32 tick = 0;
     Boolean sampled;
+#if NL_CS1_PAYLOAD_WORDS
+    /* No write, including a request DATA word, can use a read certificate. */
+    nl_cs1_payload_cancel();
+    if (!word_access_valid() || !address_valid(address)) {
+#else
     if (!word_access_valid()) {
+#endif
         if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
         return;
     }
@@ -481,8 +602,8 @@ static uint16_t exchange_inner(const uint8_t *request, uint16_t length,
  * on this C stack. No return/goto may leave the installed scope. The operation
  * bodies own no resources requiring C unwinding; their callers still execute
  * the normal typed-service nl_leave path after this function returns.
- * No nested guard or interrupt masking is required. Mapping/deadline checks
- * remain per word; a catcher is not permission to cache a dynamic mapping. */
+ * No nested guard or interrupt masking is required. Deadlines remain per word;
+ * only bounded reply-data reads may use the experimental mapping certificate. */
 static UInt16 card_run(volatile UInt16 operation, void *context)
 {
     volatile UInt16 result = FN_ERR_IO;
@@ -490,6 +611,9 @@ static UInt16 card_run(volatile UInt16 operation, void *context)
     void ** volatile list;
     UInt16 *availability = (UInt16 *)context;
     CardExchange *exchange = (CardExchange *)context;
+#if NL_CS1_PAYLOAD_WORDS
+    nl_cs1_payload_cancel();
+#endif
     support_in_operation = false;
     if (!supported()) {
         invalid = 1;
@@ -526,9 +650,15 @@ static UInt16 card_run(volatile UInt16 operation, void *context)
         }
         *list = frame.nextP;
         support_in_operation = false;
+#if NL_CS1_PAYLOAD_WORDS
+        nl_cs1_payload_cancel();
+#endif
     } else {
         *list = frame.nextP;
         support_in_operation = false;
+#if NL_CS1_PAYLOAD_WORDS
+        nl_cs1_payload_cancel();
+#endif
         /* Close an interrupted mapping before diagnostic preference I/O. */
         if (nl_cs1_map_active) nl_cs1_profile_map_end(TimGetTicks());
         if (nl_cs1_timing_active) ++nl_cs1_timing.faults;

@@ -7,7 +7,7 @@ make palmos-shared
 for spec in early:4096 late:8192; do
     position=${spec%:*}
     bytes=${spec#*:}
-    directory="build/palmos-layout-${PALMOS_SDK_VERSION:-3.1}-$position"
+    directory="${PALMOS_LAYOUT_BUILD_PREFIX:-build/palmos-layout}-${PALMOS_SDK_VERSION:-3.1}-$position"
     make palmos-shared PALMOS_SHARED_BUILD="$directory" \
         PALMOS_LAYOUT_PAD_BYTES="$bytes" PALMOS_LAYOUT_PAD_POSITION="$position"
     "$python" - "$directory" "$bytes" <<'CHECK'

@@ -11,6 +11,7 @@ from test_palmos_shared_network import NetworkMachine, HAS_NETWORK
 from test_palmos_shared_services import ServiceMachine
 try:
     from unicorn import UC_MEM_READ, UC_MEM_WRITE
+    from unicorn.m68k_const import UC_M68K_REG_A7
 except ImportError:
     pass
 
@@ -275,14 +276,26 @@ class GuardMachine(ServiceMachine):
         self.words = 0
         super().__init__()
 
+    def hook(self, uc, pc, size, context):
+        absent = False
+        if (self.failure == 'removed' and self.words >= 10 and
+                bytes(uc.mem_read(pc, 2)) == b'\x4e\x4f' and self.read16(pc + 2) == 0xa349):
+            sp = uc.reg_read(UC_M68K_REG_A7)
+            absent = self.read16(sp) == 6 and self.read16(sp + 4) == 1
+        super().hook(uc, pc, size, context)
+        if absent:
+            # Presence-query rejection with an otherwise readable old window.
+            # Actual removal faults are covered by CardFaultMachine separately.
+            uc.mem_write(self.read32(sp + 6), b'\0')
+
     def bus(self, uc, access, address, size, value, context):
+        assert not self.read16(self.globals + self.symbols['invalid']), 'MMIO after guard failure'
         super().bus(uc, access, address, size, value, context)
         if access == UC_MEM_READ and address >= self.CS1 + 0x1000:
             self.words += 1
             if self.words == 10:
                 if self.failure == 'deadline': self.now = 3500
                 elif self.failure == 'mapping': self.card_size += 2
-                elif self.failure == 'removed': self.present = False
 
     def publish(self, *args):
         super().publish(*args)
@@ -527,7 +540,14 @@ class CS1ResultTests(unittest.TestCase):
                     self.assertNotEqual(d[15], d[16])
                     self.assertEqual(d[17], 4)
                 if guard:
-                    self.assertEqual(m.words, 10)  # no MMIO after guard failure
+                    expected_words = 10
+                    if failure in ('mapping', 'removed') and foundation.CS1_PAYLOAD_WORDS:
+                        interval = foundation.CS1_PAYLOAD_WORDS
+                        expected_words = ((10 + interval - 1) // interval) * interval
+                    self.assertEqual(m.words, expected_words)
+                    # GuardMachine asserts independently that no access occurs
+                    # AFTER detection; Design B deliberately defers detection of
+                    # a silent tuple change, but never the per-word deadline.
                     self.assertNotEqual(d[24], 0)
                     self.assertEqual(d[21], {'deadline': 0, 'mapping': 7, 'removed': 3}[failure])
                 evidence = m.preferences[0x4e694c31, 0x4e37]
