@@ -101,6 +101,8 @@ class CardRecoveryTests(unittest.TestCase):
         self.assertEqual(m.read32(m.CARD_EXCEPTION_LIST), m.OUTER)
         self.assertEqual(m.read16(m.globals + m.symbols['nl_busy']), 0)
         self.assertEqual(m.read32(m.globals + m.symbols['access_address']), 0)
+        self.assertEqual(bytes(m.uc.mem_read(
+            m.globals + m.symbols['support_in_operation'], 1)), b'\0')
         for symbol in ('_fn_transport_ctx', '_fn_parse_ctx'):
             address = m.globals + m.symbols[symbol]
             self.assertEqual(bytes(m.uc.mem_read(address, 8)), b'\0' * 8)

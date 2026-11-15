@@ -100,6 +100,14 @@ is Springboard-specific. USB/serial unresolved-operation markers use separate
 state, not configuration. CS1 uses private unsaved marker 0x4e32. Applications
 must never edit these records to force a retry.
 
+USB readiness reuses a verified-clear marker only during the owned driver
+lifetime. Its two-byte RAM certificate is invalidated before marker writes and
+on Close, and restored only by a clean preference read or verified clear.
+Unknown state falls back to a fresh read. Open and explicit pending/status
+inspection still read preferences. Every exchange, including a typed read-only
+query, still persists and verifies pending before send and clear after a valid,
+fully consumed reply. This changes no public structure, trap or recovery API.
+
 `NioLibResetTransport(refNum, transport, confirmation)` requires an open library,
 ABI >=1.5 and capability `0x80`. Transport must be 1, 2 or 3; confirmation must
 equal `nioRecoveryPeerReset` (1), after the operator retired the peer's old

@@ -1,6 +1,7 @@
 #include "NioLibClient.h"
 #include "NioLibCS1Diagnostic.h"
 #include "benchmark.h"
+#include "NioLibTimingExperimental.h"
 
 Err NioTestGuardedGlobals(UInt16 refNum, UInt32 delta,
                          NioLibGlobalsResult *resultP, UInt16 *registersOK);
@@ -363,7 +364,7 @@ static void draw_benchmark(void)
     Char text[48];
     RectangleType area = {{2, 61}, {156, 72}};
     const Char *status = nio_benchmark.bytes == 65536UL ?
-        "PASS - all bytes verified" : "64 KiB fixture; 256-byte reads";
+        "PASS - all bytes verified" : "64 KiB fixture; 512-byte reads";
     if (nio_benchmark.errors) {
         switch (nio_benchmark_failure) {
         case nioBenchmarkInit: status = "FAIL: NIO initialization"; break;
@@ -382,6 +383,78 @@ static void draw_benchmark(void)
         nio_benchmark.errors, nio_benchmark.result, nio_benchmark.palm); line(text, 98);
     StrPrintF(text, "Start %lu I%lu E%lu", nio_benchmark_started, nio_benchmark.initTicks, nio_benchmark.cleanupTicks); line(text, 110);
     StrPrintF(text, "Cleanup FN %u Palm %04X", nio_benchmark.cleanupResult, nio_benchmark.cleanupPalm); line(text, 122);
+}
+
+/* Experimental CS1-only pages. Inclusive phase spans overlap mapping/prefs;
+ * sampled word/OS timings are subsets, not an additive partition. */
+static void show_cs1_timing(const NioTimingExperimental *legacy)
+{
+    NioCS1TimingExperimental t;
+    NioCS1TimingPhase *p;
+    UInt16 size = sizeof(t), i;
+    UInt32 maps = 0, mapTicks = 0, prefs = 0, net[3];
+    NioCS1TimingSample reads, writes;
+    Char a[80], b[80], c[80];
+    if (legacy->transport != nioTransportSpringboard) return;
+    if (PrefGetAppPreferences(nioLibCreator, nioCS1TimingPref, &t, &size, false) != nioCS1TimingVersion ||
+        size != sizeof(t) || t.size != sizeof(t) || t.version != nioCS1TimingVersion ||
+        t.started != legacy->started || t.exchanges != legacy->exchanges ||
+        t.exchangeTicks != legacy->exchangeTicks || t.sampleShift != 6) {
+        FrmCustomAlert(1009, "No matching CS1 timing record.", "Install both profiling PRCs.", "");
+        return;
+    }
+    MemSet(&reads, sizeof(reads), 0); MemSet(&writes, sizeof(writes), 0);
+    for (i = 0; i < nioCS1TimingPhases; ++i) {
+        p = &t.phase[i];
+        maps += p->mapCalls; mapTicks += p->mapTicks; prefs += p->prefTicks;
+        reads.calls += p->reads.calls; reads.samples += p->reads.samples; reads.ticks += p->reads.ticks;
+        writes.calls += p->writes.calls; writes.samples += p->writes.samples; writes.ticks += p->writes.ticks;
+        net[i] = p->mapTicks + p->prefTicks <= p->ticks ? p->ticks - p->mapTicks - p->prefTicks : 0;
+    }
+    StrPrintF(a, "CS1 mapping\n%lu calls / %lu ticks", maps, mapTicks);
+    StrPrintF(b, "Feature %lu calls\nSamples %lu / %lu ticks", t.features.calls, t.features.samples, t.features.ticks);
+    StrPrintF(c, "Attrs %lu calls\nSamples %lu / %lu ticks", t.attributes.calls, t.attributes.samples, t.attributes.ticks);
+    FrmCustomAlert(1009, a, b, c);
+    StrPrintF(a, "CS1 reads %lu\nSamples %lu / %lu ticks", reads.calls, reads.samples, reads.ticks);
+    StrPrintF(b, "CS1 writes %lu\nSamples %lu / %lu ticks", writes.calls, writes.samples, writes.ticks);
+    StrPrintF(c, "Sampled every 64th access.\nZero ticks: below resolution.");
+    FrmCustomAlert(1009, a, b, c);
+    StrPrintF(a, "Poll %lu ticks; checks %lu\nRESULT attempts %lu", t.phase[1].ticks,
+        t.pollChecks, t.resultAttempts);
+    StrPrintF(b, "Reply %lu ticks / %lu tries\nOther %lu ticks", t.phase[2].ticks,
+        t.replyAttempts, t.phase[0].ticks);
+    StrPrintF(c, "Idle snaps %lu; faults %lu\nPhases include map/pref time", t.settleAttempts, t.faults);
+    FrmCustomAlert(1009, a, b, c);
+    StrPrintF(a, "Poll net %lu ticks\nReply net %lu ticks", net[1], net[2]);
+    StrPrintF(b, "Other net %lu ticks\nMap %lu Pref %lu ticks", net[0], mapTicks, prefs);
+    StrPrintF(c, "Net excludes maps/prefs;\nincludes unsampled word work.");
+    FrmCustomAlert(1009, a, b, c);
+}
+
+/* Experimental: one snapshot read and UI only AFTER the timed benchmark. */
+static void show_timing(void)
+{
+    NioTimingExperimental t;
+    UInt16 size = sizeof(t);
+    Char a[80], b[80], c[80];
+    if (PrefGetAppPreferences(nioLibCreator, nioTimingPref, &t, &size, false) != nioTimingVersion ||
+        size != sizeof(t) || t.size != sizeof(t) || t.version != nioTimingVersion ||
+        t.started - nio_benchmark_started > nio_benchmark.initTicks) {
+        FrmCustomAlert(1009, "No matching timing snapshot.", "Install both experimental PRCs.", "");
+        return;
+    }
+    StrPrintF(a, "Experimental timing\nTransport %u; %u ticks/s", t.transport, t.ticksPerSecond);
+    StrPrintF(b, "Session %lu ticks\nExchange %lu / %lu ticks", t.sessionTicks, t.exchanges, t.exchangeTicks);
+    StrPrintF(c, "Exchange includes command prefs.\nPrefs also cover init/close.");
+    FrmCustomAlert(1009, a, b, c);
+    StrPrintF(a, "CS1 reads %lu / %lu ticks\nWrites %lu / %lu ticks", t.bucket[0].reads, t.bucket[0].readTicks,
+        t.bucket[0].writes, t.bucket[0].writeTicks);
+    StrPrintF(b, "USB reads %lu / %lu ticks\nWrites %lu / %lu ticks", t.bucket[1].reads, t.bucket[1].readTicks,
+        t.bucket[1].writes, t.bucket[1].writeTicks);
+    StrPrintF(c, "Other reads %lu / %lu ticks\nWrites %lu / %lu ticks", t.bucket[2].reads, t.bucket[2].readTicks,
+        t.bucket[2].writes, t.bucket[2].writeTicks);
+    FrmCustomAlert(1009, a, b, c);
+    show_cs1_timing(&t);
 }
 
 static void draw_results(void)
@@ -452,7 +525,7 @@ static Boolean handle(EventType *e)
             const Char *uri = FldGetTextPtr(benchmark_field());
             if (uri && *uri) {
                 line("Reading; please wait...", 62);
-                NioTestBenchmark(uri); draw_results();
+                NioTestBenchmark(uri); draw_results(); show_timing();
             }
             return true;
         }

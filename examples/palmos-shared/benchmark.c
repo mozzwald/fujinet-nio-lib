@@ -1,4 +1,4 @@
-/* Fixed 64 KiB, 256-byte FileRead workload. No UI, installation, retry or
+/* Fixed 64 KiB, 512-byte FileRead workload. No UI, installation, retry or
  * remote mutation. Compare the same app/fixture against both library builds.
  * The stack buffers belong to this test app, not the installed library. */
 #include "benchmark.h"
@@ -9,7 +9,10 @@ UInt16 nio_benchmark_failure;
 
 void NioTestBenchmark(const Char *uri)
 {
-    UInt8 scratch[512], data[256];
+    /* FileRead needs ten payload metadata bytes in addition to file data.
+     * These buffers add 266 stack bytes versus the 256-byte benchmark; no new
+     * persistent buffer, heap allocation or library state is required. */
+    UInt8 scratch[522], data[512];
     fn_file_io_t io;
     fn_file_read_t read;
     NioLibCleanup cleanup;

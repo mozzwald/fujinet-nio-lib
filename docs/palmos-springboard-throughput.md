@@ -1,10 +1,17 @@
 # Conservative Springboard throughput and benchmark
 
-ABI 1.6 implementation 15 checks Handspring extension availability once per
-complete mapping validation, then reads installation, base and size. Every
-word access still validates all three dynamic attributes. Discovery retains
-its checked adapter and candidate-card handling. Nothing caches card mappings
-or extension availability between validations.
+Experimental ABI 1.6 implementation 16 checks Handspring extension availability
+once per protected card operation. A one-byte A4-owned positive-support flag is
+set only inside the installed card-exception scope and cleared on both normal
+and caught exits. Every later operation probes `hsEx` afresh; failed support
+detection is not cached. This assumes the system extension remains available
+during the synchronous operation, rather than supporting its mid-call removal.
+
+Every word access still queries installation, base and size. Discovery retains
+its checked adapter, provisional CS1 mapping and candidate-card handling. No
+dynamic mapping is cached. The existing per-word deadlines, exception handling,
+pending-marker persistence, sequence checks and reply validation are unchanged.
+This is Design A only; no payload checkpoints or burst access are implemented.
 
 Deadline checks run both before and after mapping queries. After persisting
 the pending marker, the doorbell path checks mapping and time again immediately
@@ -22,8 +29,8 @@ has changed. Static Palm transport and other platforms are unaffected.
 
 ## File speed workload
 
-NioLibTest's **Network → File speed** page reads exactly 64 KiB using 256
-explicit-offset FileRead calls of 256 bytes. It checks every byte against
+NioLibTest's **Network → File speed** page reads exactly 64 KiB using 128
+explicit-offset FileRead calls of 512 bytes. It checks every byte against
 `(offset ^ (offset >> 8)) & 255`. There is no app retry, PRC installation,
 remote mutation or per-chunk drawing. Scratch/data buffers belong to the app.
 Library held-reply/request retry policy remains unchanged.
@@ -46,7 +53,7 @@ settings identical when comparing libraries. Separate cold and warm runs;
 repeat warm runs rather than judging one sample. Avoid heavy bridge tracing
 while measuring throughput. Test normal browsing and PRC installs separately.
 
-Success requires PASS, 65536 verified bytes, 256 calls, no errors, the expected
+Success requires PASS, 65536 verified bytes, 128 calls, no errors, the expected
 sum `007F8000`, and clean FN/Palm cleanup. The byte pattern check is stronger
 than the additive sum. Only complete verified chunks count toward bytes;
 the sum can include a verified prefix of a failing chunk.
@@ -68,8 +75,9 @@ cause or prove intermittent faults cannot recur.
 
 `test_palmos_shared_throughput.py` executes the compiled library/app under the
 existing `test-palmos-shared` / `check-palmos` gates. It checks unchanged word
-and dynamic attribute counts, one support query per mapping, renewed support
-checks, expiry inside mapping/persistence, no late doorbell, failed marker
-clears, exact fixture bytes/offsets, early failure without replay, separate
+and dynamic attribute counts, one support query per protected operation, renewed
+support checks at the next operation, expiry inside mapping/persistence, no late
+doorbell, failed marker clears, exact fixture bytes/offsets, early failure without
+replay, separate
 cleanup and redraw geometry. Modeled trap counts measure work, not real bus
 bandwidth or ROM timing. Actual throughput remains a physical qualification.

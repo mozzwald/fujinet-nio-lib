@@ -513,7 +513,11 @@ class CS1ResultTests(unittest.TestCase):
                 args = struct.pack('>HIIIIIHII', 7, token, 0x9000, 0x9400,
                                    0, 0x9600, 256, 0x9500, 0x9700)
                 m.failure = failure
-                m.call('NioLibFileRead', args)
+                # Experimental RAM accounting adds instructions to four full
+                # held-reply reads. Keep the protocol's four-attempt assertion
+                # below; only this emulator instruction ceiling is enlarged.
+                budget = 400000 if failure == 'checksum' and 'nl_cs1_timing' in m.symbols else 200000
+                m.call('NioLibFileRead', args, budget=budget)
                 self.assertEqual(m.read16(0x9700), outcome)
                 self.assertEqual(bytes(m.uc.mem_read(0x9600, 256)), b'\xcc' * 256)
                 d = self.diagnostic(m)

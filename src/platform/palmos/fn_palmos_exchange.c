@@ -14,10 +14,12 @@
 
 #ifdef FN_PALMOS_SHARED
 #define ACCESS_RESULT() nl_cs1_guard_result()
-#define PHASE(p) (nl_cs1_diag.phase = (p))
+#define PHASE(p) do { nl_cs1_diag.phase = (p); nl_cs1_profile_phase(p); } while (0)
+#define POLL_RESPONSE() ((void)(nl_cs1_timing_active && ++nl_cs1_timing.pollChecks), FN_PALMOS_RD(SBN_R_RESP_SEQ))
 #else
 #define ACCESS_RESULT() 0
 #define PHASE(p) ((void)0)
+#define POLL_RESPONSE() FN_PALMOS_RD(SBN_R_RESP_SEQ)
 #endif
 
 #ifndef FN_PALMOS_EXPIRED
@@ -40,6 +42,9 @@ static uint16_t read_result(uint16_t seq)
     nl_cs1_samples.expectedSequence = seq;
 #endif
     for (attempt = 0; attempt < 4; ++attempt) {
+#ifdef FN_PALMOS_SHARED
+        if (nl_cs1_timing_active) ++nl_cs1_timing.resultAttempts;
+#endif
         first = FN_PALMOS_RD(SBN_R_STATUS);
         ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
         response = FN_PALMOS_RD(SBN_R_RESP_SEQ);
@@ -180,7 +185,7 @@ uint16_t fn_palmos_exchange(const uint8_t *req, uint16_t len, uint8_t *resp, uin
         if (ACCESS_RESULT()) return ACCESS_RESULT();
         PHASE(nioCS1PhaseWait);
         start = TimGetTicks();
-        while (FN_PALMOS_RD(SBN_R_RESP_SEQ) != _fn_palmos_seq)
+        while (POLL_RESPONSE() != _fn_palmos_seq)
             if (FN_PALMOS_EXPIRED(start, wait)) {
 #ifdef FN_PALMOS_SHARED
                 nl_cs1_diag.reason = nioCS1ReasonPoll;
@@ -201,6 +206,7 @@ uint16_t fn_palmos_exchange(const uint8_t *req, uint16_t len, uint8_t *resp, uin
     for (tries = 0; tries <= READ_RETRIES; tries++) {
 #ifdef FN_PALMOS_SHARED
         nl_cs1_diag.replyAttempt = tries + 1;
+        if (nl_cs1_timing_active) ++nl_cs1_timing.replyAttempts;
 #endif
         if (!read_reply(resp, cap, resp_len, &wire_len)) {
             if (ACCESS_RESULT()) { *resp_len = 0; return ACCESS_RESULT(); }

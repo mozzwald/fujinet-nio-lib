@@ -7,6 +7,13 @@
 #define USB_PREF 0x4e36
 static Char usb_name[] = "USB Library";
 static UInt16 usb_ref, usb_loaded, usb_opened, usb_fault;
+/* A clear certificate belongs only to this owned driver lifetime. This private
+ * preference has no other library writer: Reset rejects physical ownership.
+ * A successful marker read/clear already established the next readiness test;
+ * do not repeat that read for every command. Never cache pending/unknown state,
+ * skip write verification, or use this certificate after Close/unload.
+ * Cost: one Palm-owned UInt16, no caller pointer or additional heap storage. */
+static UInt16 usb_marker_clear;
 static UInt8 usb_tx[1024];
 
 /* A USB timeout is NOT proof that the peer retired the old physical session.
@@ -17,15 +24,23 @@ UInt16 nl_usb_pending(void)
 {
     UInt16 marker = 0, size = sizeof(marker);
     Int16 v = PrefGetAppPreferences(nioLibCreator, USB_PREF, &marker, &size, false);
-    return v != noPreferenceFound && (v != 1 || size != sizeof(marker) || marker);
+    UInt16 pending = v != noPreferenceFound && (v != 1 || size != sizeof(marker) || marker);
+    usb_marker_clear = !pending;
+    return pending;
 }
 static Boolean mark(UInt16 value)
 {
     UInt16 check = ~value, size = sizeof(check);
     Int16 v;
+    Boolean verified;
+    /* Invalidate before attempting any write, including failures. A later
+     * readiness call falls back to the preference if its state is unknown. */
+    usb_marker_clear = 0;
     PrefSetAppPreferences(nioLibCreator, USB_PREF, 1, &value, sizeof(value), false);
     v = PrefGetAppPreferences(nioLibCreator, USB_PREF, &check, &size, false);
-    return v == 1 && size == sizeof(check) && check == value;
+    verified = v == 1 && size == sizeof(check) && check == value;
+    if (verified && !value) usb_marker_clear = 1;
+    return verified;
 }
 UInt16 nl_usb_owned(void) { return usb_opened || usb_loaded; }
 Err nl_usb_reset(void)
@@ -52,6 +67,7 @@ UInt16 nl_usb_available(void)
 }
 void nl_usb_close(void)
 {
+    usb_marker_clear = 0;
     if (usb_opened) {
         /* Driver owns no app pointer: queued data lives in usb_tx until Close.
          * Keep globals alive if Close fails; never free a live driver's data. */
@@ -90,7 +106,10 @@ UInt16 nl_usb_open(void)
     usb_opened = 1;
     return FN_OK;
 }
-UInt16 nl_usb_ready(void) { return usb_opened && !usb_fault && !nl_usb_pending(); }
+UInt16 nl_usb_ready(void)
+{
+    return usb_opened && !usb_fault && (usb_marker_clear || !nl_usb_pending());
+}
 static UInt16 receive_exact(UInt8 *buffer, UInt16 count, UInt32 start, UInt32 wait)
 {
     UInt32 available, got;

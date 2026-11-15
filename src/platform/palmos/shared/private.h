@@ -4,6 +4,47 @@
 #include "fujinet-nio.h"
 #include "NioLib.h"
 #include "NioLibCS1Diagnostic.h"
+#include "NioLibTimingExperimental.h"
+
+/* Experimental wrappers preserve arguments, results and preference ordering. */
+Int16 nl_timing_pref_get(UInt32, UInt16, void *, UInt16 *, Boolean);
+void nl_timing_pref_set(UInt32, UInt16, Int16, void *, UInt16, Boolean);
+#define PrefGetAppPreferences nl_timing_pref_get
+#define PrefSetAppPreferences nl_timing_pref_set
+
+/* Experimental CS1 accounting. No timers are inserted between the final
+ * deadline check and MMIO. Word samples reuse that existing guard timestamp;
+ * feature/attribute samples bracket only every 64th existing OS operation. */
+extern NioCS1TimingExperimental nl_cs1_timing;
+extern NioCS1TimingPhase *nl_cs1_timing_current;
+extern UInt16 nl_cs1_timing_active, nl_cs1_map_active;
+extern UInt32 nl_cs1_guard_tick;
+void nl_cs1_profile_phase(UInt16 diagnosticPhase);
+UInt16 nl_cs1_profile_set(UInt16 phase);
+void nl_cs1_profile_map_begin(UInt32 tick);
+void nl_cs1_profile_map_end(UInt32 tick);
+#define NL_CS1_SAMPLE_BEGIN(counter, sampled, tick) do { \
+    (sampled) = false; \
+    if (nl_cs1_timing_active) { \
+        ++(counter).calls; \
+        (sampled) = !((counter).calls & nioCS1TimingSampleMask); \
+        if (sampled) (tick) = TimGetTicks(); \
+    } \
+} while (0)
+#define NL_CS1_WORD_BEGIN(counter, sampled, tick) do { \
+    (sampled) = false; \
+    if (nl_cs1_timing_active) { \
+        ++(counter).calls; \
+        (sampled) = !((counter).calls & nioCS1TimingSampleMask); \
+        (tick) = nl_cs1_guard_tick; \
+    } \
+} while (0)
+#define NL_CS1_SAMPLE_END(counter, sampled, tick) do { \
+    if (sampled) { \
+        (counter).ticks += TimGetTicks() - (tick); \
+        ++(counter).samples; \
+    } \
+} while (0)
 
 /* Shared-only hooks: the default static Palm build remains unchanged. */
 UInt16 nl_bus_read(UInt32 address);

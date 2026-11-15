@@ -136,7 +136,7 @@ Err NioLibGetVersion(UInt16 refNum, NioLibVersion *v)
     (void)refNum;
     if (!v || v->size != sizeof(*v)) return nioLibErrParam;
     v->abiMajor = nioLibAbiMajor; v->abiMinor = nioLibAbiMinor;
-    v->implementation = 15;
+    v->implementation = 16; /* Experimental operation-scoped hsEx cache. */
     return errNone;
 }
 

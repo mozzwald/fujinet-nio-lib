@@ -23,6 +23,11 @@ uint16_t nl_original_exchange(const uint8_t *, uint16_t, uint8_t *, uint16_t, ui
 #define PENDING_MAGIC 0x4e4c5031UL
 typedef struct { UInt32 magic, base; UInt16 sequence, reserved; } Pending;
 static UInt16 candidate_card, invalid, posted, ambiguous, last_result;
+/* Positive system capability only, scoped to card_run's installed catcher.
+ * Handspring's ROM extension must remain available during that synchronous
+ * operation. This one-byte A4 flag never caches presence/base/size or survives
+ * an operation exit; a later entry probes hsEx again, including after faults. */
+static Boolean support_in_operation;
 static UInt32 started, budget;
 NioLibCS1Diagnostic nl_cs1_diag;
 NioLibCS1Samples nl_cs1_samples;
@@ -38,6 +43,20 @@ typedef struct {
     UInt16 capacity, *got;
 } CardExchange;
 static UInt16 card_run(volatile UInt16 operation, void *context);
+
+/* Keep the existing deadline entry ahead of the added profiling helpers so
+ * the repository's early-padding fixture retains its DISP16 call range. */
+void nl_deadline(UInt16 milliseconds)
+{
+    started = TimGetTicks();
+    budget = ((UInt32)milliseconds * SysTicksPerSecond() + 999) / 1000;
+    if (!budget) budget = 1;
+    invalid = 0;
+    nl_cs1_diag.guard = 0;
+    nl_cs1_diag.guardDetail = 0;
+    posted = ambiguous = 0; last_result = 0xffff;
+}
+
 
 static void diagnostic_start(const UInt8 *request)
 {
@@ -82,9 +101,15 @@ UInt16 nl_cs1_guard_result(void)
 
 static Boolean supported(void)
 {
-    UInt32 version;
+    UInt32 version, tick = 0;
+    Boolean sampled;
+    Err err;
+    if (support_in_operation) return true;
     /* HsExtCommon.h: hsFtrCreator='hsEx', hsFtrIDVersion=0. */
-    return FtrGet('hsEx', 0, &version) == errNone && version != 0;
+    NL_CS1_SAMPLE_BEGIN(nl_cs1_timing.features, sampled, tick);
+    err = FtrGet('hsEx', 0, &version);
+    NL_CS1_SAMPLE_END(nl_cs1_timing.features, sampled, tick);
+    return err == errNone && version != 0;
 }
 
 /* The caller has just checked the extensions feature. Keep discovery's
@@ -92,7 +117,11 @@ static Boolean supported(void)
 static Err card_attr_supported(UInt16 card, UInt16 attr, void *value)
 {
     Err err;
+    UInt32 tick = 0;
+    Boolean sampled;
+    NL_CS1_SAMPLE_BEGIN(nl_cs1_timing.attributes, sampled, tick);
     err = nl_hs_get(card, attr, value);
+    NL_CS1_SAMPLE_END(nl_cs1_timing.attributes, sampled, tick);
     if (!err && attr == 4) candidate_card = card;
     return err;
 }
@@ -103,15 +132,15 @@ Err nl_card_attr(UInt16 card, UInt16 attr, void *value)
     return card_attr_supported(card, attr, value);
 }
 
-static Boolean mapping_valid(void)
+static Boolean mapping_valid_inner(void)
 {
     UInt8 installed = 0;
     UInt32 base = 0, size = 0;
     UInt16 card = _fn_palmos_card ? _fn_palmos_card : candidate_card;
     UInt16 detail = 0;
     if (!_fn_palmos_cs1 || !card) detail = 1;
-    /* HsExt availability is system-wide. Check it once for this validation,
-     * not once per attribute. All three dynamic attributes remain per access. */
+    /* The protected operation already established system-wide HsExt support.
+     * All three dynamic attributes remain queried before every word access. */
     else if (!supported()) detail = 2;
     else if (card_attr_supported(card, 1, &installed)) detail = 2;
     else if (!installed) detail = 3;
@@ -131,20 +160,22 @@ static Boolean mapping_valid(void)
     return true;
 }
 
-void nl_deadline(UInt16 milliseconds)
+/* Non-word checks are rare and need their own clock boundaries. The hot word
+ * path below instead reuses its original before/after deadline clock samples. */
+static Boolean mapping_valid(void)
 {
-    started = TimGetTicks();
-    budget = ((UInt32)milliseconds * SysTicksPerSecond() + 999) / 1000;
-    if (!budget) budget = 1;
-    invalid = 0;
-    nl_cs1_diag.guard = 0;
-    nl_cs1_diag.guardDetail = 0;
-    posted = ambiguous = 0; last_result = 0xffff;
+    Boolean valid;
+    if (!nl_cs1_timing_active) return mapping_valid_inner();
+    nl_cs1_profile_map_begin(TimGetTicks());
+    valid = mapping_valid_inner();
+    nl_cs1_profile_map_end(TimGetTicks());
+    return valid;
 }
 
 int nl_expired(UInt32 start, UInt32 wait)
 {
     UInt32 now = TimGetTicks();
+    if (nl_cs1_timing_active) nl_cs1_guard_tick = now;
     return invalid || now - started >= budget || now - start > wait;
 }
 
@@ -192,21 +223,45 @@ Err nl_cs1_reset(void)
     return errNone;
 }
 
+/* Same short-circuit guard ordering as the conservative implementation.
+ * No added OS call on the successful mapping path. RAM counter work does not
+ * remove or defer either original deadline check. Failure-only clock closure
+ * and the non-word mapping wrapper do not introduce a late bus access. */
+static Boolean word_access_valid(void)
+{
+    Boolean valid;
+    if (nl_cs1_expired(started, budget)) return false;
+    nl_cs1_profile_map_begin(nl_cs1_guard_tick);
+    if (!mapping_valid_inner()) {
+        if (nl_cs1_map_active) nl_cs1_profile_map_end(TimGetTicks());
+        return false;
+    }
+    valid = !nl_cs1_expired(started, budget);
+    nl_cs1_profile_map_end(nl_cs1_guard_tick);
+    return valid;
+}
+
 UInt16 nl_bus_read(UInt32 address)
 {
-    if (nl_cs1_expired(started, budget) || !mapping_valid() ||
-        nl_cs1_expired(started, budget)) {
+    UInt16 value;
+    UInt32 tick = 0;
+    Boolean sampled;
+    if (!word_access_valid()) {
         if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
         return 0;
     }
+    NL_CS1_WORD_BEGIN(nl_cs1_timing_current->reads, sampled, tick);
     access_address = address;
-    return *(volatile UInt16 *)address;
+    value = *(volatile UInt16 *)address;
+    NL_CS1_SAMPLE_END(nl_cs1_timing_current->reads, sampled, tick);
+    return value;
 }
 
 void nl_bus_write(UInt32 address, UInt16 value)
 {
-    if (nl_cs1_expired(started, budget) || !mapping_valid() ||
-        nl_cs1_expired(started, budget)) {
+    UInt32 tick = 0;
+    Boolean sampled;
+    if (!word_access_valid()) {
         if (!nl_cs1_diag.faultAddress) nl_cs1_diag.faultAddress = address;
         return;
     }
@@ -226,19 +281,22 @@ void nl_bus_write(UInt32 address, UInt16 value)
         }
         posted = 1;
     }
+    NL_CS1_WORD_BEGIN(nl_cs1_timing_current->writes, sampled, tick);
     access_address = address;
     *(volatile UInt16 *)address = value;
+    NL_CS1_SAMPLE_END(nl_cs1_timing_current->writes, sampled, tick);
 }
 
 /* Register reads are independent bus cycles. A single inconsistent snapshot
  * must not abort an otherwise completed transfer. Require two consecutive
  * matching idle snapshots, with at most four attempts (no new wait deadline).
  * Only read state here: an unresolved request is never reset or replayed. */
-static Boolean settled(UInt16 seq, UInt16 *sequenceP)
+static Boolean settled_inner(UInt16 seq, UInt16 *sequenceP)
 {
     UInt16 first, ack, response, last, previous = 0, attempt;
     Boolean stable = false;
     for (attempt = 0; attempt < 4; attempt++) {
+        if (nl_cs1_timing_active) ++nl_cs1_timing.settleAttempts;
         first = FN_PALMOS_RD(SBN_R_STATUS);
         ack = FN_PALMOS_RD(SBN_R_ACK_SEQ);
         response = FN_PALMOS_RD(SBN_R_RESP_SEQ);
@@ -262,6 +320,16 @@ static Boolean settled(UInt16 seq, UInt16 *sequenceP)
         stable = true;
     }
     return false;
+}
+
+/* Account the existing stable completion snapshots as polling too; this does
+ * not change diagnostics' phase or issue any additional register access. */
+static Boolean settled(UInt16 seq, UInt16 *sequenceP)
+{
+    UInt16 previous = nl_cs1_profile_set(nioCS1TimingPoll);
+    Boolean valid = settled_inner(seq, sequenceP);
+    nl_cs1_profile_set(previous);
+    return valid;
 }
 
 static Boolean synchronize(void)
@@ -394,6 +462,7 @@ static uint16_t exchange_inner(const uint8_t *request, uint16_t length,
         return last_result;
     }
     result = nl_original_exchange(request, length, response, capacity, got);
+    nl_cs1_profile_phase(nioCS1PhaseSync); /* profiling only; retain diagnostic phase */
     last_result = result;
     if (nl_cs1_diag.guard) nl_cs1_diag.reason = nioCS1ReasonLocal;
     diagnostic_save(result);
@@ -421,6 +490,7 @@ static UInt16 card_run(volatile UInt16 operation, void *context)
     void ** volatile list;
     UInt16 *availability = (UInt16 *)context;
     CardExchange *exchange = (CardExchange *)context;
+    support_in_operation = false;
     if (!supported()) {
         invalid = 1;
         nl_cs1_diag.guard = nioCS1GuardMapping;
@@ -435,6 +505,7 @@ static UInt16 card_run(volatile UInt16 operation, void *context)
     frame.nextP = (ErrExceptionPtr)*list;
     *list = &frame;
     if (ErrSetJump(frame.state) == 0) {
+        support_in_operation = true;
         switch (operation) {
         case cardInit:
             result = fn_palmos_open() ? FN_OK : FN_ERR_NOT_FOUND;
@@ -454,8 +525,13 @@ static UInt16 card_run(volatile UInt16 operation, void *context)
             break;
         }
         *list = frame.nextP;
+        support_in_operation = false;
     } else {
         *list = frame.nextP;
+        support_in_operation = false;
+        /* Close an interrupted mapping before diagnostic preference I/O. */
+        if (nl_cs1_map_active) nl_cs1_profile_map_end(TimGetTicks());
+        if (nl_cs1_timing_active) ++nl_cs1_timing.faults;
         invalid = 1;
         nl_cs1_diag.guard = nioCS1GuardCardFault;
         /* Read the SDK-owned error field from memory after longjmp. */
